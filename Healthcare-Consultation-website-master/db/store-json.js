@@ -55,13 +55,38 @@ function createJsonStore(dbFile) {
     async getUserByEmail(email) {
       return read().users.find(u => u.email.toLowerCase() === email.toLowerCase()) || null;
     },
-    async createUser({ name, email, phone, password }) {
+    async createUser({ name, email, phone, password, dateOfBirth }) {
       const db = read();
       if (db.users.some(u => u.email.toLowerCase() === email.toLowerCase())) return null; // duplicate
-      const user = { id: idFor(db.users), name, email, phone, password, createdAt: new Date().toISOString() };
+      const user = { id: idFor(db.users), name, email, phone, password, ...(dateOfBirth ? { dateOfBirth } : {}), createdAt: new Date().toISOString() };
       db.users.push(user);
       write(db);
       return user;
+    },
+    async createDoctorUser({ name, email, phone, password, doctorId }) {
+      const db = read();
+      if (db.users.some(u => u.email.toLowerCase() === email.toLowerCase()) ||
+          db.users.some(u => u.doctorId === doctorId)) return null;
+      const user = {
+        id: idFor(db.users), name, email, phone, password, role: "doctor", doctorId,
+        createdAt: new Date().toISOString()
+      };
+      db.users.push(user);
+      write(db);
+      return user;
+    },
+    async listDoctorsWithoutAccount() {
+      const db = read();
+      const assigned = new Set(db.users.filter(user => user.role === "doctor").map(user => user.doctorId));
+      return db.doctors.filter(doctor => !assigned.has(doctor.id));
+    },
+    async getDoctorByUserId(userId) {
+      const db = read();
+      const account = db.users.find(user => user.id === userId && user.role === "doctor");
+      return account ? db.doctors.find(doctor => doctor.id === account.doctorId) || null : null;
+    },
+    async getDoctorAccountId(doctorId) {
+      return read().users.find(user => user.role === "doctor" && user.doctorId === doctorId)?.id || null;
     },
     async setUserRole(id, role) {
       const db = read();
@@ -126,16 +151,176 @@ function createJsonStore(dbFile) {
       const mine = read().appointments.filter(a => a.userId === userId);
       return { total: mine.length, noShows: mine.filter(a => a.status === "No-show").length };
     },
-    async createAppointment({ userId, doctorId, providerName, providerAddress, providerSource, date, notes, status }) {
+    async createAppointment({ userId, doctorId, providerName, providerAddress, providerSource, date, notes, symptoms, status }) {
       const db = read();
       const appointment = {
         id: idFor(db.appointments), userId, doctorId: doctorId || null,
         ...(doctorId ? {} : { providerName, providerAddress, providerSource }),
-        date, notes, status, createdAt: new Date().toISOString()
+        date, notes, symptoms: symptoms || "", consultationNotes: "", status, createdAt: new Date().toISOString()
       };
       db.appointments.push(appointment);
       write(db);
       return appointment;
+    },
+    async listAppointmentsForDoctor(doctorId) {
+      const db = read();
+      return db.appointments.filter(appointment => appointment.doctorId === doctorId)
+        .sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
+        .map(appointment => ({
+          ...appointment,
+          patient: (() => {
+            const { password, ...patient } = db.users.find(user => user.id === appointment.userId) || {};
+            return patient.id ? patient : null;
+          })(),
+          doctor: db.doctors.find(doctor => doctor.id === doctorId)
+        }));
+    },
+    async getAppointmentForParticipant(appointmentId, userId) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId);
+      if (!appointment) return null;
+      const user = db.users.find(item => item.id === userId);
+      const doctorAccount = user?.role === "doctor" && user.doctorId === appointment.doctorId;
+      if (appointment.userId !== userId && !doctorAccount) return null;
+      const { password: patientPassword, ...patient } = db.users.find(item => item.id === appointment.userId) || {};
+      return {
+        ...appointment,
+        patient: patient.id ? patient : null,
+        doctor: db.doctors.find(item => item.id === appointment.doctorId) || null
+      };
+    },
+    async updateAppointmentStatus(appointmentId, doctorId, expectedStatus, status) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId && item.doctorId === doctorId);
+      if (!appointment || appointment.status !== expectedStatus) return null;
+      appointment.status = status;
+      if (status === "Completed") appointment.completedAt = new Date().toISOString();
+      write(db);
+      return appointment;
+    },
+    async saveConsultation(appointmentId, doctorId, patientId, notes) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId &&
+        item.doctorId === doctorId && item.userId === patientId);
+      if (!appointment) return null;
+      appointment.consultationNotes = notes;
+      write(db);
+      return appointment;
+    },
+    async savePrescription(appointmentId, doctorId, patientId, encryptedData) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId &&
+        item.doctorId === doctorId && item.userId === patientId);
+      if (!appointment) return null;
+      let prescription = db.prescriptions.find(item => item.appointmentId === appointmentId);
+      if (prescription) {
+        prescription.encryptedData = encryptedData.toString("base64");
+        prescription.createdAt = new Date().toISOString();
+      } else {
+        prescription = {
+          id: idFor(db.prescriptions), appointmentId, patientId, doctorId: db.users.find(user => user.doctorId === doctorId && user.role === "doctor").id,
+          encryptedData: encryptedData.toString("base64"), createdAt: new Date().toISOString()
+        };
+        db.prescriptions.push(prescription);
+      }
+      write(db);
+      return { id: prescription.id, appointmentId, patientId, createdAt: prescription.createdAt };
+    },
+    async listPrescriptionsForPatient(patientId) {
+      const db = read();
+      return db.prescriptions.filter(item => item.patientId === patientId).map(item => ({
+        id: item.id, appointmentId: item.appointmentId, patientId: item.patientId,
+        doctorId: item.doctorId, encryptedData: Buffer.from(item.encryptedData, "base64"), createdAt: item.createdAt
+      }));
+    },
+    async saveMedicalReport({ patientId, uploadedBy, filename, mimeType, encryptedData }) {
+      const db = read();
+      const report = {
+        id: idFor(db.medicalReports), patientId, uploadedBy, filename, mimeType,
+        encryptedData: encryptedData.toString("base64"), createdAt: new Date().toISOString()
+      };
+      db.medicalReports.push(report);
+      write(db);
+      return { id: report.id, patientId, filename, mimeType, createdAt: report.createdAt };
+    },
+    async listMedicalReportsForPatient(patientId) {
+      return read().medicalReports.filter(report => report.patientId === patientId).map(report => ({
+        id: report.id, patientId, filename: report.filename, mimeType: report.mimeType, createdAt: report.createdAt
+      }));
+    },
+    async getMedicalReportForParticipant(reportId, userId) {
+      const db = read();
+      const report = db.medicalReports.find(item => item.id === reportId);
+      if (!report) return null;
+      const user = db.users.find(item => item.id === userId);
+      const appointmentAccess = user?.role === "doctor" && db.appointments.some(item =>
+        item.userId === report.patientId && item.doctorId === user.doctorId);
+      if (report.patientId !== userId && !appointmentAccess) return null;
+      return {
+        id: report.id, patientId: report.patientId, filename: report.filename, mimeType: report.mimeType,
+        encryptedData: Buffer.from(report.encryptedData, "base64"), createdAt: report.createdAt
+      };
+    },
+    async doctorAnalytics(doctorId) {
+      const appointments = read().appointments.filter(item => item.doctorId === doctorId);
+      return {
+        total: appointments.length,
+        completed: appointments.filter(item => item.status === "Completed").length,
+        pending: appointments.filter(item => item.status === "Pending").length
+      };
+    },
+    async patientAnalytics(patientId) {
+      const db = read();
+      const appointments = db.appointments.filter(item => item.userId === patientId);
+      return {
+        appointments: appointments.length,
+        completed: appointments.filter(item => item.status === "Completed").length,
+        pending: appointments.filter(item => item.status === "Pending").length,
+        reports: db.medicalReports.filter(item => item.patientId === patientId).length,
+        prescriptions: db.prescriptions.filter(item => item.patientId === patientId).length
+      };
+    },
+    async adminAnalytics() {
+      const db = read();
+      const patients = db.users.filter(user => !user.role || user.role === "patient");
+      const appointments = db.appointments;
+      const specialtyCounts = new Map();
+      const symptomCounts = new Map();
+      for (const appointment of appointments) {
+        const doctor = db.doctors.find(item => item.id === appointment.doctorId);
+        if (doctor) specialtyCounts.set(doctor.specialty, (specialtyCounts.get(doctor.specialty) || 0) + 1);
+        for (const term of String(appointment.symptoms || "").toLowerCase().match(/[a-z]{4,}/g) || []) {
+          if (!["with", "from", "have", "that", "this", "when", "your", "been", "were", "pain"].includes(term)) {
+            symptomCounts.set(term, (symptomCounts.get(term) || 0) + 1);
+          }
+        }
+      }
+      const completed = appointments.filter(item => item.status === "Completed").length;
+      const now = new Date();
+      const ageDistribution = { under18: 0, "18to39": 0, "40to64": 0, "65plus": 0, unavailable: 0 };
+      for (const patient of patients) {
+        if (!patient.dateOfBirth) { ageDistribution.unavailable += 1; continue; }
+        const age = Math.floor((now - new Date(patient.dateOfBirth)) / 31557600000);
+        const band = age < 18 ? "under18" : age < 40 ? "18to39" : age < 65 ? "40to64" : "65plus";
+        ageDistribution[band] += 1;
+      }
+      return {
+        totalPatients: patients.length,
+        consultations: appointments.length,
+        completed,
+        completionRate: appointments.length ? Math.round(completed * 100 / appointments.length) : 0,
+        mostRequestedSpecialty: [...specialtyCounts].sort((a, b) => b[1] - a[1])[0]?.[0] || "Not available",
+        ageDistribution,
+        commonSymptoms: [...symptomCounts].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([symptom, count]) => ({ symptom, count }))
+      };
+    },
+    async updateDoctorAvailability(doctorId, schedule) {
+      const db = read();
+      const doctor = db.doctors.find(item => item.id === doctorId);
+      if (!doctor) return null;
+      doctor.schedule = schedule;
+      write(db);
+      return doctor;
     },
 
     async listOrdersForUser(userId) { return read().orders.filter(o => o.userId === userId); },

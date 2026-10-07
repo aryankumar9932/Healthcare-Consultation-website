@@ -13,7 +13,7 @@
   <header class="topbar">
     <a class="brand" href="/dashboard"><span class="brand-mark">+</span><span>Care<span>Connect</span></span></a>
     <nav>
-      <a href="/dashboard">Dashboard</a><a href="/doctors">Doctors</a><a href="/hospitals">Hospitals</a><a href="/nearby">Nearby care</a><a href="/ai-tools">AI tools</a><a class="button button-primary nav-ml-link" href="/ml-service">ML service</a><a href="/pharmacy">Pharmacy</a><a href="/appointments">My appointments</a>
+      <a href="/dashboard">Dashboard</a><a href="/doctors">Doctors</a><a href="/hospitals">Hospitals</a><a href="/nearby">Nearby care</a><a href="/ai-tools">AI tools</a><a class="button button-primary nav-ml-link" href="/ml-service">ML service</a><a href="/pharmacy">Pharmacy</a><a href="/appointments">My appointments</a><a id="doctor-nav" href="/doctor" hidden>Doctor dashboard</a>
     </nav>
     <div class="header-actions"><span id="user-label"></span><button id="auth-button" class="button button-outline">Sign in</button><button id="cart-button" class="cart">Cart <b id="cart-count">0</b></button></div>
   </header>
@@ -61,6 +61,25 @@
         <p class="admin-note">The clinic address is sent to OpenStreetMap’s public address search to place its map pin. New or relocated clinics stay private until you preview and confirm the pin on OpenStreetMap. Geocoding by Nominatim.</p>
       </form>
       <div id="managed-clinics" class="managed-clinics"></div>
+      <div class="section-heading admin-analytics-heading"><div><p class="eyebrow">SERVICE OVERVIEW</p><h2>Health analytics</h2></div></div>
+      <div id="admin-analytics" class="health-metrics" aria-live="polite"></div>
+      <form id="doctor-account-form" class="clinic-form">
+        <h3>Create doctor account</h3><p>Only assign accounts to verified clinicians in the directory. Share the initial password with the doctor privately.</p>
+        <label>Doctor profile<select name="doctorId" required></select></label>
+        <label>Doctor account name<input name="name" maxlength="100" required></label>
+        <label>Sign-in email<input name="email" type="email" maxlength="254" required></label>
+        <label>Phone<input name="phone" maxlength="40"></label>
+        <label>Initial password (12+ characters)<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+        <button class="button button-primary" type="submit">Create doctor account</button>
+      </form>
+    </section>
+    <section class="section" id="doctor-dashboard" data-page="doctor">
+      <div class="section-heading"><div><p class="eyebrow">CARECONNECT CLINICAL WORKSPACE</p><h2>Doctor Dashboard</h2></div><p id="doctor-profile"></p></div>
+      <div id="doctor-metrics" class="health-metrics" aria-live="polite"></div>
+      <section class="clinical-panel"><h3>Today's and upcoming appointments</h3><div id="doctor-appointments" class="appointment-list"><p class="empty">Loading assigned appointments…</p></div></section>
+      <section class="clinical-panel"><h3>Availability</h3><p>Enter one day/time window per line. Patients see this schedule when choosing an appointment.</p>
+        <form id="doctor-availability-form"><label for="doctor-availability">Weekly availability<textarea id="doctor-availability" name="schedule" rows="5" maxlength="1500" placeholder="Monday 09:00 - 13:00"></textarea></label><button class="button button-primary" type="submit">Save availability</button></form>
+      </section>
     </section>
     <section class="section ml-service-section" id="ml-service" data-page="ml-service">
       <div class="section-heading"><div><p class="eyebrow">CARECONNECT ML SERVICE</p><h2>Local model tools</h2></div><p>Use the optional CareConnect ML service for specialty suggestions and experimental appointment attendance estimates.</p></div>
@@ -68,6 +87,7 @@
       <div class="ai-grid ml-service-grid">
         <article class="ai-card">
           <p class="ai-number">01 · CARE NAVIGATION</p><h3>Find a starting point</h3>
+          <p class="triage-safety-note"><strong>Navigation aid only:</strong> this tool suggests a type of clinician to consider. It does not diagnose a condition, replace clinical assessment, or prescribe treatment. For severe or rapidly worsening symptoms, contact emergency services now.</p>
           <p>Describe what you would like help with and get a general specialty suggestion. The local model is used when available and confident.</p>
           <form id="recommendation-form"><label for="symptoms">What would you like help with?</label><textarea id="symptoms" name="symptoms" rows="4" maxlength="1500" required placeholder="Describe your concern (avoid sharing identifying details)"></textarea><button class="button button-primary" type="submit">Suggest a specialty</button></form>
           <div id="recommendation-result" class="ai-result" aria-live="polite"></div>
@@ -127,12 +147,21 @@
       </div>
       <div class="appointment-list-heading"><h3>Your bookings</h3></div>
       <div id="appointment-list" class="appointment-list"><p class="empty">Sign in to see your appointments.</p></div>
+      <section class="clinical-panel patient-health-panel"><h3>Health overview</h3><div id="patient-metrics" class="health-metrics" aria-live="polite"></div></section>
+      <section class="clinical-panel patient-health-panel"><h3>Medical reports</h3>
+        <p>Reports are encrypted before storage. Text is extracted locally for basic measurement labels; this is not a diagnosis. If you upload an image, it is sent to Gemini only with your explicit consent.</p>
+        <form id="report-upload-form"><label for="medical-report-file">Upload one report (PDF, DOCX, TXT, PNG, JPG, or WEBP; up to 8 MB)<input id="medical-report-file" name="report" type="file" accept=".pdf,.docx,.txt,.png,.jpg,.jpeg,.webp" required></label>
+          <label class="consent-checkbox"><input id="report-ai-consent" name="externalAiConsent" type="checkbox" value="true"> I consent to send an uploaded report image to Gemini for text extraction.</label>
+          <button class="button button-primary" type="submit">Upload and extract</button></form>
+        <div id="patient-reports" class="appointment-list" aria-live="polite"></div>
+      </section>
+      <section class="clinical-panel patient-health-panel"><h3>Prescriptions</h3><div id="patient-prescriptions" class="appointment-list" aria-live="polite"></div></section>
     </section>
   </main>
   <footer><div class="brand"><span class="brand-mark">+</span><span>Care<span>Connect</span></span></div><p>Making better healthcare easier to access.</p><p class="footer-note">AI features use Google's Gemini API. Prompts and submitted documents are sent online and outputs are informational only.</p></footer>
   <div id="toast" class="toast"></div>
   <dialog id="auth-dialog" aria-label="Sign in or create an account"><button class="dialog-close" data-close>×</button><div id="auth-content"></div></dialog>
-  <dialog id="booking-dialog"><button class="dialog-close" data-close>×</button><h2 id="booking-title">Book an appointment</h2><p id="booking-doctor"></p><p id="booking-request-note" class="booking-request-note" hidden></p><form id="booking-form"><label>Date and time<input name="date" type="datetime-local" required></label><label>Anything we should know? <span>(optional)</span><textarea name="notes" rows="3"></textarea></label><button id="booking-submit" class="button button-primary" type="submit">Confirm appointment</button></form></dialog>
+  <dialog id="booking-dialog"><button class="dialog-close" data-close>×</button><h2 id="booking-title">Book an appointment</h2><p id="booking-doctor"></p><p id="booking-request-note" class="booking-request-note" hidden></p><form id="booking-form"><label>Date and time<input name="date" type="datetime-local" required></label><label>Symptoms or reason for visit <span>(optional; shared with your assigned doctor)</span><textarea name="symptoms" rows="3" maxlength="1500"></textarea></label><label>Anything else we should know? <span>(optional)</span><textarea name="notes" rows="3" maxlength="1000"></textarea></label><button id="booking-submit" class="button button-primary" type="submit">Confirm appointment</button></form></dialog>
   <dialog id="cart-dialog"><button class="dialog-close" data-close>×</button><h2>Your cart</h2><div id="cart-content"></div></dialog>
   <dialog id="location-consent-dialog" class="location-consent-dialog" aria-labelledby="location-consent-title">
     <h2 id="location-consent-title">Find doctors and medical stores near you?</h2>
@@ -140,6 +169,13 @@
     <p>OpenStreetMap's public services have usage limits and may be temporarily unavailable. You can choose “Not now” and use the directory without location.</p>
     <div class="clinic-form-actions"><button id="confirm-location-button" class="button button-primary" type="button">Share location and find doctors</button>
       <button id="decline-location-button" class="button button-outline" type="button">Not now</button></div>
+  </dialog>
+  <dialog id="video-dialog" class="video-dialog" aria-labelledby="video-title">
+    <button class="dialog-close" data-video-close aria-label="Close video consultation">×</button>
+    <h2 id="video-title">Video consultation</h2>
+    <p id="video-status" aria-live="polite">Media is peer-to-peer and is not recorded by CareConnect.</p>
+    <div class="video-tiles"><video id="remote-video" autoplay playsinline></video><video id="local-video" autoplay muted playsinline></video></div>
+    <button id="video-end" class="button button-outline" type="button">End call</button>
   </dialog>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="/geo.js"></script>

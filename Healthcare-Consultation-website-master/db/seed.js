@@ -24,7 +24,9 @@ const seed = {
   users: [],
   appointments: [],
   orders: [],
-  clinics: []
+  clinics: [],
+  prescriptions: [],
+  medicalReports: []
 };
 
 module.exports = { seed };

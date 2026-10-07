@@ -19,6 +19,7 @@ services:
     environment:
       DATABASE_URL: postgres://careconnect:${POSTGRES_PASSWORD}@db:5432/careconnect
       SESSION_SECRET: ${SESSION_SECRET:?set a long random session secret}
+      REPORT_ENCRYPTION_KEY: ${REPORT_ENCRYPTION_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ML_SERVICE_URL: http://ml:8000
       ML_SERVICE_KEY: ${ML_SERVICE_KEY:?set a long random ML service key}

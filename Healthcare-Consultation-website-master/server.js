@@ -5,11 +5,13 @@ const path = require("path");
 const crypto = require("crypto");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
+const PDFDocument = require("pdfkit");
 const { analyzeDocument, chatWithHealthAssistant, predictNoShow, readPrescription, recommendSpecialty } = require("./ml");
 const { normalizeOpenStreetMapElement } = require("./public/geo");
 const mlService = require("./ml-client");
 const { createStore } = require("./db");
 const { applySecurityHeaders, csrfToken, csrfProtection, defaultLimits, limiter } = require("./security");
+const { encryptionKey, encryptClinicalData, decryptClinicalData, extractReportMeasurements, extractReportHistory } = require("./clinical");
 
 const root = __dirname;
 const publicDir = path.join(root, "public");
@@ -17,6 +19,7 @@ const dataDir = path.join(root, "data");
 const dbFile = process.env.DB_FILE || path.join(dataDir, "db.json");
 const port = Number(process.env.PORT || 3000);
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
+const clinicalEncryptionKey = encryptionKey(process.env.REPORT_ENCRYPTION_KEY || sessionSecret);
 
 if (process.env.NODE_ENV === "production" && !process.env.SESSION_SECRET) {
   throw new Error("SESSION_SECRET must be set in production.");
@@ -74,6 +77,23 @@ function validDate(value) {
 function isAdmin(user) {
   return user.role === "admin";
 }
+
+const requireDoctor = wrap(async (req, res, next) => {
+  if (req.user.role !== "doctor" || !Number.isSafeInteger(Number(req.user.doctorId))) {
+    return res.status(403).json({ error: "Verified doctor access is required." });
+  }
+  const doctor = await store.getDoctorByUserId(req.user.id);
+  if (!doctor) return res.status(403).json({ error: "This doctor account is not linked to an active directory profile." });
+  req.doctor = doctor;
+  next();
+});
+
+const requirePatient = (req, res, next) => {
+  if (req.user.role !== "patient" && req.user.role !== undefined) {
+    return res.status(403).json({ error: "Patient access is required." });
+  }
+  next();
+};
 
 function canBootstrapAdmin(user) {
   return Boolean(
@@ -154,10 +174,19 @@ function publicClinic(clinic) {
   return { ...clinic, doctor: publicUser(clinic.doctor) };
 }
 
+function validDateOfBirth(value) {
+  if (!value) return true;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  const age = (Date.now() - date.getTime()) / 31557600000;
+  return date.toISOString().slice(0, 10) === value && age >= 0 && age <= 125;
+}
+
 function createApp(options = {}) {
   const limits = { ...defaultLimits(), ...(options.limits || {}) };
   const app = express();
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1 } });
+  const activeVideoCalls = new Map();
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 4 } });
   app.disable("x-powered-by");
   applySecurityHeaders(app);
   app.use(express.json({ limit: "32kb" }));
@@ -260,11 +289,14 @@ function createApp(options = {}) {
     const name = String(body.name || "").trim();
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
-    if (!name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8 || password.length > 128) {
+    const dateOfBirth = String(body.dateOfBirth || "");
+    if (!name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8 || password.length > 128 ||
+        !validDateOfBirth(dateOfBirth)) {
       return res.status(400).json({ error: "Enter a valid name and email, and a password of at least 8 characters." });
     }
     const user = await store.createUser({
-      name, email, phone: String(body.phone || "").trim().slice(0, 40), password: hashPassword(password)
+      name, email, phone: String(body.phone || "").trim().slice(0, 40), password: hashPassword(password),
+      dateOfBirth: dateOfBirth || undefined
     });
     if (!user) return res.status(409).json({ error: "An account with that email already exists." });
     await startSession(req, user.id);
@@ -311,6 +343,31 @@ function createApp(options = {}) {
     }
     const user = await store.setUserRole(req.user.id, "admin");
     res.json({ user: sessionUser(user) });
+  }));
+
+  app.get("/api/admin/doctors/unassigned", requireUser, requireAdmin, wrap(async (req, res) => {
+    res.json(await store.listDoctorsWithoutAccount());
+  }));
+  app.post("/api/admin/doctor-accounts", requireUser, requireAdmin, wrap(async (req, res) => {
+    const body = req.body || {};
+    const doctorId = Number(body.doctorId);
+    const doctor = Number.isSafeInteger(doctorId) ? await store.getDoctor(doctorId) : null;
+    const name = String(body.name || "").trim();
+    const email = String(body.email || "").trim().toLowerCase();
+    const password = String(body.password || "");
+    if (!doctor || name.length < 2 || name.length > 100 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 12 || password.length > 128) {
+      return res.status(400).json({ error: "Choose a directory doctor and provide a valid email, name, and temporary password of at least 12 characters." });
+    }
+    const user = await store.createDoctorUser({
+      name, email, phone: String(body.phone || "").trim().slice(0, 40),
+      password: hashPassword(password), doctorId
+    });
+    if (!user) return res.status(409).json({ error: "That email or doctor profile already has an account." });
+    res.status(201).json({ user: sessionUser(user), doctor });
+  }));
+  app.get("/api/admin/analytics", requireUser, requireAdmin, wrap(async (req, res) => {
+    res.json(await store.adminAnalytics());
   }));
 
   app.get("/api/admin/clinics", requireUser, requireAdmin, wrap(async (req, res) => {
@@ -368,17 +425,18 @@ function createApp(options = {}) {
     res.status(204).end();
   }));
 
-  app.get("/api/appointments", requireUser, wrap(async (req, res) => {
+  app.get("/api/appointments", requireUser, requirePatient, wrap(async (req, res) => {
     res.json(await store.listAppointmentsForUser(req.user.id));
   }));
 
-  app.post("/api/appointments", requireUser, wrap(async (req, res) => {
+  app.post("/api/appointments", requireUser, requirePatient, wrap(async (req, res) => {
     const body = req.body || {};
     const requestedDoctorId = Number(body.doctorId);
     const doctor = Number.isSafeInteger(requestedDoctorId) && requestedDoctorId > 0
       ? await store.getDoctor(requestedDoctorId)
       : null;
     const date = String(body.date || "");
+    const symptoms = String(body.symptoms || "").trim();
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
     const providerAddress = typeof body.providerAddress === "string" ? body.providerAddress.trim() : "";
     const externalProvider = !doctor &&
@@ -386,18 +444,276 @@ function createApp(options = {}) {
       body.providerCategory === "healthcare" &&
       providerName.length >= 2 && providerName.length <= 160 &&
       providerAddress.length <= 300;
-    if ((!doctor && !externalProvider) || !validDate(date)) {
+    if ((!doctor && !externalProvider) || !validDate(date) || symptoms.length > 1500) {
       return res.status(400).json({ error: "Choose a listed doctor or nearby healthcare provider and a future appointment date." });
     }
     const appointment = await store.createAppointment({
       userId: req.user.id,
       doctorId: doctor ? doctor.id : null,
       providerName, providerAddress, providerSource: "openstreetmap",
-      date,
+      date, symptoms,
       notes: String(body.notes || "").trim().slice(0, 1000),
       status: doctor ? "Pending" : "Request saved · unconfirmed"
     });
     res.status(201).json(appointment);
+  }));
+
+  app.get("/api/doctor/me", requireUser, requireDoctor, (req, res) => {
+    res.json({ doctor: req.doctor, user: sessionUser(req.user) });
+  });
+  app.get("/api/doctor/appointments", requireUser, requireDoctor, wrap(async (req, res) => {
+    const appointments = await store.listAppointmentsForDoctor(req.doctor.id);
+    const reportsByPatient = new Map();
+    for (const appointment of appointments) {
+      if (!reportsByPatient.has(appointment.userId)) {
+        reportsByPatient.set(appointment.userId, await store.listMedicalReportsForPatient(appointment.userId));
+      }
+      appointment.reports = reportsByPatient.get(appointment.userId);
+      appointment.prescriptionAvailable = (await store.listPrescriptionsForPatient(appointment.userId))
+        .some(prescription => prescription.appointmentId === appointment.id);
+    }
+    res.json(appointments);
+  }));
+  app.get("/api/doctor/analytics", requireUser, requireDoctor, wrap(async (req, res) => {
+    res.json(await store.doctorAnalytics(req.doctor.id));
+  }));
+  app.put("/api/doctor/availability", requireUser, requireDoctor, wrap(async (req, res) => {
+    const schedule = (req.body || {}).schedule;
+    if (!Array.isArray(schedule) || schedule.length > 14 ||
+        schedule.some(slot => typeof slot !== "string" || slot.trim().length < 3 || slot.length > 100)) {
+      return res.status(400).json({ error: "Availability must contain up to 14 day and time entries." });
+    }
+    res.json({ doctor: await store.updateDoctorAvailability(req.doctor.id, schedule.map(slot => slot.trim())) });
+  }));
+  app.post("/api/doctor/appointments/:id/status", requireUser, requireDoctor, wrap(async (req, res) => {
+    const appointmentId = Number(req.params.id);
+    const status = String((req.body || {}).status || "");
+    const appointment = (await store.listAppointmentsForDoctor(req.doctor.id))
+      .find(item => item.id === appointmentId);
+    if (!appointment) return res.status(404).json({ error: "Appointment not found." });
+    const allowed = appointment.status === "Pending" && ["Accepted", "Rejected"].includes(status) ||
+      appointment.status === "Accepted" && status === "Completed";
+    if (!allowed) return res.status(409).json({ error: "That appointment status transition is not allowed." });
+    const updated = await store.updateAppointmentStatus(appointmentId, req.doctor.id, appointment.status, status);
+    if (!updated) return res.status(409).json({ error: "The appointment changed before the status could be saved. Refresh and try again." });
+    res.json(updated);
+  }));
+  app.put("/api/doctor/appointments/:id/consultation", requireUser, requireDoctor, wrap(async (req, res) => {
+    const appointmentId = Number(req.params.id);
+    const notes = String((req.body || {}).notes || "").trim();
+    const appointment = (await store.listAppointmentsForDoctor(req.doctor.id))
+      .find(item => item.id === appointmentId);
+    if (!appointment) return res.status(404).json({ error: "Appointment not found." });
+    if (!["Accepted", "Completed"].includes(appointment.status)) {
+      return res.status(409).json({ error: "Accept the appointment before adding consultation notes." });
+    }
+    if (!notes || notes.length > 12000) {
+      return res.status(400).json({ error: "Consultation notes must contain 1 to 12,000 characters." });
+    }
+    res.json(await store.saveConsultation(appointmentId, req.doctor.id, appointment.userId, notes));
+  }));
+  app.post("/api/doctor/appointments/:id/prescription", requireUser, requireDoctor, wrap(async (req, res) => {
+    const appointmentId = Number(req.params.id);
+    const appointment = (await store.listAppointmentsForDoctor(req.doctor.id))
+      .find(item => item.id === appointmentId);
+    if (!appointment) return res.status(404).json({ error: "Appointment not found." });
+    if (!["Accepted", "Completed"].includes(appointment.status)) {
+      return res.status(409).json({ error: "Accept the appointment before creating a prescription." });
+    }
+    const body = req.body || {};
+    const instructions = String(body.instructions || "").trim();
+    const items = body.items;
+    if (!Array.isArray(items) || items.length < 1 || items.length > 30 || instructions.length > 4000) {
+      return res.status(400).json({ error: "Enter 1 to 30 prescribed medicines and valid instructions." });
+    }
+    const normalized = items.map(item => ({
+      medicine: String(item && item.medicine || "").trim(),
+      dosage: String(item && item.dosage || "").trim(),
+      duration: String(item && item.duration || "").trim(),
+      instructions: String(item && item.instructions || "").trim()
+    }));
+    if (normalized.some(item => !item.medicine || item.medicine.length > 160 ||
+        !item.dosage || item.dosage.length > 100 || !item.duration || item.duration.length > 100 ||
+        item.instructions.length > 300)) {
+      return res.status(400).json({ error: "Each medicine needs a name, dosage, and duration; check field lengths." });
+    }
+    const encryptedData = encryptClinicalData(Buffer.from(JSON.stringify({
+      instructions, items: normalized, createdAt: new Date().toISOString()
+    })), clinicalEncryptionKey);
+    const prescription = await store.savePrescription(appointmentId, req.doctor.id, appointment.userId, encryptedData);
+    if (!prescription) return res.status(404).json({ error: "The appointment could not be linked to this prescription." });
+    res.status(201).json(prescription);
+  }));
+
+  app.get("/api/doctor/patients/:patientId/reports", requireUser, requireDoctor, wrap(async (req, res) => {
+    const patientId = Number(req.params.patientId);
+    if (!(await store.listAppointmentsForDoctor(req.doctor.id)).some(appointment => appointment.userId === patientId)) {
+      return res.status(404).json({ error: "Patient record not found." });
+    }
+    res.json(await store.listMedicalReportsForPatient(patientId));
+  }));
+
+  app.get("/api/patient/analytics", requireUser, requirePatient, wrap(async (req, res) => {
+    res.json(await store.patientAnalytics(req.user.id));
+  }));
+  app.get("/api/patient/reports", requireUser, requirePatient, wrap(async (req, res) => {
+    const reports = await store.listMedicalReportsForPatient(req.user.id);
+    res.json(await Promise.all(reports.map(async report => {
+      const saved = await store.getMedicalReportForParticipant(report.id, req.user.id);
+      const payload = JSON.parse(decryptClinicalData(saved.encryptedData, clinicalEncryptionKey).toString("utf8"));
+      return {
+        ...report, measurements: payload.measurements, history: payload.history,
+        extractionSource: payload.extractionSource
+      };
+    })));
+  }));
+  app.get("/api/patient/prescriptions", requireUser, requirePatient, wrap(async (req, res) => {
+    const prescriptions = await store.listPrescriptionsForPatient(req.user.id);
+    res.json(await Promise.all(prescriptions.map(async prescription => {
+      const details = JSON.parse(decryptClinicalData(prescription.encryptedData, clinicalEncryptionKey).toString("utf8"));
+      const appointment = await store.getAppointmentForParticipant(prescription.appointmentId, req.user.id);
+      return {
+        id: prescription.id, appointmentId: prescription.appointmentId,
+        doctorName: appointment?.doctor?.name || "CareConnect doctor",
+        createdAt: prescription.createdAt, ...details
+      };
+    })));
+  }));
+  app.post("/api/patient/reports", requireUser, requirePatient, upload.single("report"), wrap(async (req, res) => {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "Choose a medical report file to upload." });
+    const extension = path.extname(file.originalname).toLowerCase();
+    const supported = {
+      ".pdf": "application/pdf",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".txt": "text/plain",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp"
+    };
+    if (!supported[extension] || supported[extension] !== file.mimetype) {
+      return res.status(400).json({ error: "Upload a PDF, DOCX, TXT, PNG, JPG, or WEBP report." });
+    }
+    const isImage = extension === ".png" || extension === ".jpg" || extension === ".jpeg" || extension === ".webp";
+    const validSignature = extension === ".pdf" ? file.buffer.subarray(0, 5).toString() === "%PDF-" :
+      extension === ".docx" ? file.buffer.subarray(0, 2).toString() === "PK" :
+        extension === ".png" ? file.buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) :
+          extension === ".jpg" || extension === ".jpeg" ? file.buffer.subarray(0, 3).equals(Buffer.from([255, 216, 255])) :
+            extension === ".webp" ? file.buffer.subarray(0, 4).toString() === "RIFF" && file.buffer.subarray(8, 12).toString() === "WEBP" :
+              extension === ".txt";
+    if (!validSignature) return res.status(400).json({ error: "The uploaded report file does not match its file type." });
+    let extractedText;
+    let extractionSource = "Local PDF/DOCX/TXT text extraction";
+    if (extension === ".pdf") extractedText = (await pdfParse(file.buffer)).text;
+    else if (extension === ".docx") extractedText = (await mammoth.extractRawText({ buffer: file.buffer })).value;
+    else if (extension === ".txt") extractedText = new TextDecoder("utf-8", { fatal: true }).decode(file.buffer);
+    else {
+      if (req.body.externalAiConsent !== "true") {
+        return res.status(400).json({ error: "Image text extraction sends the image to Gemini. Confirm that consent before uploading." });
+      }
+      const result = await analyzeDocument({
+        image: { mime: file.mimetype, data: file.buffer.toString("base64") }
+      });
+      extractedText = [result.summary, ...result.keyFindings].join("\n");
+      extractionSource = "Gemini image extraction; clinician verification required";
+    }
+    extractedText = String(extractedText || "").slice(0, 12000);
+    if (!extractedText.trim()) {
+      return res.status(400).json({ error: "No readable text was extracted from the report. Try a text-based PDF or DOCX." });
+    }
+    const payload = {
+      fileData: file.buffer.toString("base64"),
+      extractedText,
+      measurements: extractReportMeasurements(extractedText),
+      history: extractReportHistory(extractedText),
+      extractionSource
+    };
+    const encryptedData = encryptClinicalData(Buffer.from(JSON.stringify(payload)), clinicalEncryptionKey);
+    const filename = path.basename(file.originalname).replace(/[\r\n"]/g, "_").slice(0, 180);
+    const report = await store.saveMedicalReport({
+      patientId: req.user.id, uploadedBy: req.user.id, filename, mimeType: file.mimetype, encryptedData
+    });
+    res.status(201).json({
+      ...report, measurements: payload.measurements, history: payload.history, extractionSource
+    });
+  }));
+  app.get("/api/reports/:id/file", requireUser, wrap(async (req, res) => {
+    const report = await store.getMedicalReportForParticipant(Number(req.params.id), req.user.id);
+    if (!report) return res.status(404).json({ error: "Report not found." });
+    const payload = JSON.parse(decryptClinicalData(report.encryptedData, clinicalEncryptionKey).toString("utf8"));
+    const fileData = Buffer.from(payload.fileData, "base64");
+    res.setHeader("Content-Type", report.mimeType);
+    res.setHeader("Content-Length", fileData.length);
+    const disposition = ["application/pdf", "image/png", "image/jpeg", "image/webp"].includes(report.mimeType) ? "inline" : "attachment";
+    res.setHeader("Content-Disposition", `${disposition}; filename="${report.filename.replace(/[\r\n"]/g, "_")}"`);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.end(fileData);
+  }));
+  app.get("/api/prescriptions/:id/pdf", requireUser, requirePatient, wrap(async (req, res) => {
+    const prescriptions = await store.listPrescriptionsForPatient(req.user.id);
+    const prescription = prescriptions.find(item => item.id === Number(req.params.id));
+    if (!prescription) return res.status(404).json({ error: "Prescription not found." });
+    const details = JSON.parse(decryptClinicalData(prescription.encryptedData, clinicalEncryptionKey).toString("utf8"));
+    const appointment = await store.getAppointmentForParticipant(prescription.appointmentId, req.user.id);
+    if (!appointment) return res.status(404).json({ error: "Prescription appointment not found." });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="careconnect-prescription-${prescription.id}.pdf"`);
+    const pdf = new PDFDocument({ size: "A4", margin: 54 });
+    pdf.pipe(res);
+    pdf.fontSize(20).text("CareConnect Prescription");
+    pdf.moveDown().fontSize(11).text(`Patient: ${appointment.patient.name}`);
+    pdf.text(`Prescriber: ${appointment.doctor?.name || "CareConnect doctor"}`);
+    pdf.text(`Consultation: ${new Date(appointment.date).toLocaleString()}`);
+    pdf.moveDown().fontSize(14).text("Medicines");
+    details.items.forEach((item, index) => {
+      pdf.moveDown(0.5).fontSize(11).text(`${index + 1}. ${item.medicine}`);
+      pdf.text(`Dosage: ${item.dosage}   Duration: ${item.duration}`);
+      if (item.instructions) pdf.text(`Instructions: ${item.instructions}`);
+    });
+    if (details.instructions) pdf.moveDown().text(`Additional instructions: ${details.instructions}`);
+    pdf.moveDown().fontSize(9).fillColor("#555").text("This document records instructions entered by the prescriber. Contact your doctor or pharmacist with questions. Do not change prescribed treatment without professional advice.");
+    pdf.end();
+  }));
+
+  app.get("/api/video/appointments/:id/signals", requireUser, wrap(async (req, res) => {
+    const appointment = await store.getAppointmentForParticipant(Number(req.params.id), req.user.id);
+    if (!appointment || appointment.status !== "Accepted" || !appointment.doctorId) {
+      return res.status(404).json({ error: "An accepted appointment is required for this video consultation." });
+    }
+    const after = Number(req.query.after || 0);
+    if (!Number.isSafeInteger(after) || after < 0) return res.status(400).json({ error: "Invalid video signal cursor." });
+    const cutoff = Date.now() - 15 * 60 * 1000;
+    const signals = (activeVideoCalls.get(appointment.id) || []).filter(signal => signal.createdAt >= cutoff);
+    activeVideoCalls.set(appointment.id, signals);
+    res.json({ signals: signals.filter(signal => signal.id > after && signal.senderId !== req.user.id).slice(0, 50) });
+  }));
+  app.post("/api/video/appointments/:id/signals", requireUser, wrap(async (req, res) => {
+    const appointment = await store.getAppointmentForParticipant(Number(req.params.id), req.user.id);
+    if (!appointment || appointment.status !== "Accepted" || !appointment.doctorId) {
+      return res.status(404).json({ error: "An accepted appointment is required for this video consultation." });
+    }
+    const signal = (req.body || {}).signal;
+    if (!signal || !["offer", "answer", "candidate"].includes(signal.type) ||
+        Buffer.byteLength(JSON.stringify(signal)) > 20000) {
+      return res.status(400).json({ error: "Invalid video consultation signal." });
+    }
+    if (["offer", "answer"].includes(signal.type) &&
+        (!signal.description || typeof signal.description.sdp !== "string" || signal.description.sdp.length > 18000)) {
+      return res.status(400).json({ error: "Invalid WebRTC session description." });
+    }
+    if (signal.type === "candidate" &&
+        (!signal.candidate || typeof signal.candidate.candidate !== "string" || signal.candidate.candidate.length > 3000)) {
+      return res.status(400).json({ error: "Invalid WebRTC ICE candidate." });
+    }
+    const now = Date.now();
+    const cutoff = now - 15 * 60 * 1000;
+    const signals = (activeVideoCalls.get(appointment.id) || []).filter(item => item.createdAt >= cutoff);
+    if (signals.length >= 200) return res.status(429).json({ error: "This video consultation signal queue is full. Rejoin the call." });
+    const id = (signals.at(-1)?.id || 0) + 1;
+    signals.push({ id, senderId: req.user.id, signal, createdAt: now });
+    activeVideoCalls.set(appointment.id, signals);
+    res.status(202).json({ id });
   }));
 
   app.get("/api/orders", requireUser, wrap(async (req, res) => {
@@ -630,7 +946,7 @@ function createApp(options = {}) {
 
   app.use("/admin/Res_img", express.static(path.join(root, "admin", "Res_img"), { fallthrough: false, index: false }));
   app.use(express.static(publicDir, { index: "index.html" }));
-  app.get(["/dashboard", "/doctors", "/hospitals", "/nearby", "/ai-tools", "/ml-service", "/pharmacy", "/appointments"], (req, res) => {
+  app.get(["/dashboard", "/doctors", "/hospitals", "/nearby", "/ai-tools", "/ml-service", "/pharmacy", "/appointments", "/doctor"], (req, res) => {
     res.sendFile(path.join(publicDir, "index.html"));
   });
   app.use((req, res) => res.status(404).json({ error: "Not found." }));

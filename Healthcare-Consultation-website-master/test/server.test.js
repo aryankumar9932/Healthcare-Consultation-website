@@ -89,6 +89,8 @@ const { app, store, ready } = require("../server");
 let server;
 let baseUrl;
 let sessionCookie;
+let doctorCookie;
+let adminCookie;
 
 test.before(async () => {
   await ready;
@@ -109,7 +111,7 @@ test.after(async () => {
 });
 
 test("serves each navigation page at its own URL", async () => {
-  const pages = ["dashboard", "doctors", "hospitals", "nearby", "ai-tools", "ml-service", "pharmacy", "appointments"];
+  const pages = ["dashboard", "doctors", "hospitals", "nearby", "ai-tools", "ml-service", "pharmacy", "appointments", "doctor"];
   for (const page of pages) {
     const response = await fetch(`${baseUrl}/${page}`);
     assert.equal(response.status, 200, `/${page} should be available`);
@@ -369,7 +371,7 @@ test("restricts clinic management to the configured admin and publishes real-add
   const setCookies = typeof registration.headers.getSetCookie === "function"
     ? registration.headers.getSetCookie()
     : [registration.headers.get("set-cookie") || ""];
-  const adminCookie = setCookies.map(value => value.split(";")[0]).join("; ");
+  adminCookie = setCookies.map(value => value.split(";")[0]).join("; ");
   const forbidden = await fetch(`${baseUrl}/api/admin/clinics`, { headers: { Cookie: adminCookie } });
   assert.equal(forbidden.status, 403);
 
@@ -385,6 +387,26 @@ test("restricts clinic management to the configured admin and publishes real-add
     body: JSON.stringify({ setupToken: process.env.ADMIN_SETUP_TOKEN })
   });
   assert.equal(activation.status, 200);
+  const doctorAccount = await fetch(`${baseUrl}/api/admin/doctor-accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: adminCookie },
+    body: JSON.stringify({
+      doctorId: 1, name: "Dr Test", email: "doctor@example.com",
+      password: "doctor-temporary-password"
+    })
+  });
+  assert.equal(doctorAccount.status, 201);
+  assert.equal((await doctorAccount.json()).doctor.name, "Dr. Halima");
+  const doctorLogin = await fetch(`${baseUrl}/api/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "doctor@example.com", password: "doctor-temporary-password" })
+  });
+  assert.equal(doctorLogin.status, 200);
+  const doctorCookies = typeof doctorLogin.headers.getSetCookie === "function"
+    ? doctorLogin.headers.getSetCookie()
+    : [doctorLogin.headers.get("set-cookie") || ""];
+  doctorCookie = doctorCookies.map(value => value.split(";")[0]).join("; ");
   const created = await fetch(`${baseUrl}/api/admin/clinics`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Cookie: adminCookie },
@@ -411,4 +433,165 @@ test("restricts clinic management to the configured admin and publishes real-add
   });
   assert.equal(removed.status, 204);
   assert.deepEqual(await (await fetch(`${baseUrl}/api/clinics`)).json(), []);
+});
+
+test("supports assigned doctor workflows, encrypted patient reports, prescriptions, analytics, and video signaling", async () => {
+  const patientRegistration = await fetch(`${baseUrl}/api/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: "Clinical Test Patient",
+      email: "clinical-patient@example.com",
+      password: "clinical-patient-password",
+      dateOfBirth: "1990-04-12"
+    })
+  });
+  assert.equal(patientRegistration.status, 201);
+  const patientCookies = typeof patientRegistration.headers.getSetCookie === "function"
+    ? patientRegistration.headers.getSetCookie()
+    : [patientRegistration.headers.get("set-cookie") || ""];
+  const patientCookie = patientCookies.map(value => value.split(";")[0]).join("; ");
+
+  const appointmentDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const booking = await fetch(`${baseUrl}/api/appointments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: patientCookie },
+    body: JSON.stringify({
+      doctorId: 1, date: appointmentDate,
+      symptoms: "Recurring headache and fever", notes: "Please review my report."
+    })
+  });
+  assert.equal(booking.status, 201);
+  const appointment = await booking.json();
+  assert.equal(appointment.symptoms, "Recurring headache and fever");
+
+  const doctorAppointments = await fetch(`${baseUrl}/api/doctor/appointments`, { headers: { Cookie: doctorCookie } });
+  assert.equal(doctorAppointments.status, 200);
+  const doctorList = await doctorAppointments.json();
+  const assigned = doctorList.find(item => item.id === appointment.id);
+  assert.equal(assigned.patient.name, "Clinical Test Patient");
+  assert.equal(assigned.symptoms, "Recurring headache and fever");
+  assert.equal(assigned.status, "Pending");
+
+  const patientDoctorAccess = await fetch(`${baseUrl}/api/doctor/appointments`, { headers: { Cookie: patientCookie } });
+  assert.equal(patientDoctorAccess.status, 403);
+  const patientAdminAccess = await fetch(`${baseUrl}/api/admin/doctors/unassigned`, { headers: { Cookie: patientCookie } });
+  assert.equal(patientAdminAccess.status, 403);
+  const deniedStatusChange = await fetch(`${baseUrl}/api/doctor/appointments/${appointment.id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json", Cookie: patientCookie },
+    body: JSON.stringify({ status: "Accepted" })
+  });
+  assert.equal(deniedStatusChange.status, 403);
+
+  const availability = await fetch(`${baseUrl}/api/doctor/availability`, {
+    method: "PUT", headers: { "Content-Type": "application/json", Cookie: doctorCookie },
+    body: JSON.stringify({ schedule: ["Monday 09:00 - 13:00"] })
+  });
+  assert.equal(availability.status, 200);
+  assert.deepEqual((await availability.json()).doctor.schedule, ["Monday 09:00 - 13:00"]);
+
+  const accepted = await fetch(`${baseUrl}/api/doctor/appointments/${appointment.id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json", Cookie: doctorCookie },
+    body: JSON.stringify({ status: "Accepted" })
+  });
+  assert.equal(accepted.status, 200);
+  const invalidTransition = await fetch(`${baseUrl}/api/doctor/appointments/${appointment.id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json", Cookie: doctorCookie },
+    body: JSON.stringify({ status: "Rejected" })
+  });
+  assert.equal(invalidTransition.status, 409);
+
+  const consultation = await fetch(`${baseUrl}/api/doctor/appointments/${appointment.id}/consultation`, {
+    method: "PUT", headers: { "Content-Type": "application/json", Cookie: doctorCookie },
+    body: JSON.stringify({ notes: "Discussed symptoms; follow up if symptoms worsen." })
+  });
+  assert.equal(consultation.status, 200);
+
+  const upload = new FormData();
+  upload.set("report", new Blob([
+    "Hemoglobin: 11.2 g/dL\nWBC 8,200 cells/uL\nBlood pressure 130/85 mmHg\nWeight 67 kg\nPrevious conditions: asthma\nCurrent medicines: Example A"
+  ], { type: "text/plain" }), "cbc-report.txt");
+  const reportResponse = await fetch(`${baseUrl}/api/patient/reports`, {
+    method: "POST", headers: { Cookie: patientCookie }, body: upload
+  });
+  assert.equal(reportResponse.status, 201);
+  const report = await reportResponse.json();
+  assert.equal(report.measurements.length, 4);
+  assert.deepEqual(report.history, { conditions: ["asthma"], currentMedications: ["Example A"] });
+  assert.match(report.extractionSource, /Local/);
+
+  const patientReports = await fetch(`${baseUrl}/api/patient/reports`, { headers: { Cookie: patientCookie } });
+  const patientReport = (await patientReports.json())[0];
+  assert.equal(patientReport.filename, "cbc-report.txt");
+  assert.deepEqual(patientReport.history, { conditions: ["asthma"], currentMedications: ["Example A"] });
+  const doctorReport = await fetch(`${baseUrl}/api/reports/${report.id}/file`, { headers: { Cookie: doctorCookie } });
+  assert.equal(doctorReport.status, 200);
+  assert.match(await doctorReport.text(), /Hemoglobin: 11.2/);
+
+  const imageWithoutConsent = new FormData();
+  imageWithoutConsent.set("report", new Blob([
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+  ], { type: "image/png" }), "scan.png");
+  const deniedImage = await fetch(`${baseUrl}/api/patient/reports`, {
+    method: "POST", headers: { Cookie: patientCookie }, body: imageWithoutConsent
+  });
+  assert.equal(deniedImage.status, 400);
+  imageWithoutConsent.set("externalAiConsent", "true");
+  const unconfiguredImage = await fetch(`${baseUrl}/api/patient/reports`, {
+    method: "POST", headers: { Cookie: patientCookie }, body: imageWithoutConsent
+  });
+  assert.equal(unconfiguredImage.status, 503);
+  assert.match((await unconfiguredImage.json()).error, /GEMINI_API_KEY/i);
+
+  const outsiderRegistration = await fetch(`${baseUrl}/api/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Unrelated Patient", email: "outsider@example.com", password: "outsider-password" })
+  });
+  const outsiderCookies = typeof outsiderRegistration.headers.getSetCookie === "function"
+    ? outsiderRegistration.headers.getSetCookie()
+    : [outsiderRegistration.headers.get("set-cookie") || ""];
+  const outsiderCookie = outsiderCookies.map(value => value.split(";")[0]).join("; ");
+  const deniedReport = await fetch(`${baseUrl}/api/reports/${report.id}/file`, {
+    headers: { Cookie: outsiderCookie }
+  });
+  assert.equal(deniedReport.status, 404);
+
+  const prescription = await fetch(`${baseUrl}/api/doctor/appointments/${appointment.id}/prescription`, {
+    method: "POST", headers: { "Content-Type": "application/json", Cookie: doctorCookie },
+    body: JSON.stringify({
+      items: [{ medicine: "Example medicine", dosage: "As directed by clinician", duration: "5 days", instructions: "After food" }],
+      instructions: "Follow up with your doctor if symptoms worsen."
+    })
+  });
+  assert.equal(prescription.status, 201);
+  const savedPrescription = await prescription.json();
+  const patientPrescriptions = await fetch(`${baseUrl}/api/patient/prescriptions`, { headers: { Cookie: patientCookie } });
+  const prescriptionList = await patientPrescriptions.json();
+  assert.equal(prescriptionList[0].items[0].medicine, "Example medicine");
+  const pdf = await fetch(`${baseUrl}/api/prescriptions/${savedPrescription.id}/pdf`, { headers: { Cookie: patientCookie } });
+  assert.equal(pdf.status, 200);
+  assert.match(pdf.headers.get("content-type"), /application\/pdf/);
+  assert.equal((await pdf.arrayBuffer()).byteLength > 500, true);
+
+  const patientMetrics = await fetch(`${baseUrl}/api/patient/analytics`, { headers: { Cookie: patientCookie } });
+  assert.deepEqual(await patientMetrics.json(), {
+    appointments: 1, completed: 0, pending: 0, reports: 1, prescriptions: 1
+  });
+  const doctorMetrics = await fetch(`${baseUrl}/api/doctor/analytics`, { headers: { Cookie: doctorCookie } });
+  assert.equal((await doctorMetrics.json()).completed >= 0, true);
+
+  const offer = await fetch(`${baseUrl}/api/video/appointments/${appointment.id}/signals`, {
+    method: "POST", headers: { "Content-Type": "application/json", Cookie: doctorCookie },
+    body: JSON.stringify({ signal: { type: "offer", description: { type: "offer", sdp: "test-sdp" } } })
+  });
+  assert.equal(offer.status, 202);
+  const patientSignals = await fetch(`${baseUrl}/api/video/appointments/${appointment.id}/signals`, {
+    headers: { Cookie: patientCookie }
+  });
+  assert.equal((await patientSignals.json()).signals[0].signal.type, "offer");
+
+  const adminMetrics = await fetch(`${baseUrl}/api/admin/analytics`, { headers: { Cookie: adminCookie } });
+  assert.equal(adminMetrics.status, 200);
+  assert.equal((await adminMetrics.json()).totalPatients >= 1, true);
 });

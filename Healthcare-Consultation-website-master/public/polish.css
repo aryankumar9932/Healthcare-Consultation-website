@@ -257,6 +257,131 @@ nav .nav-ml-link:focus-visible {
   cursor: pointer;
 }
 
+.health-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.health-metric {
+  min-width: 0;
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #fff;
+}
+
+.health-metric span,
+.health-metric strong {
+  display: block;
+}
+
+.health-metric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.health-metric strong {
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+  font-size: 21px;
+}
+
+.clinical-panel,
+.doctor-appointment-card {
+  margin-top: 22px;
+  padding: clamp(18px, 3vw, 26px);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+}
+
+.clinical-panel > h3,
+.doctor-appointment-card h3 {
+  margin-top: 0;
+}
+
+.doctor-appointment-card > * + * {
+  margin-top: 18px;
+}
+
+.doctor-appointment-heading p {
+  overflow-wrap: anywhere;
+}
+
+.doctor-appointment-actions,
+.clinical-entry-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.clinical-entry-form {
+  display: block;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.clinical-entry-form label textarea {
+  width: 100%;
+}
+
+.clinical-entry-form > strong {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.triage-safety-note {
+  padding: 12px 14px;
+  border-left: 4px solid #d97939;
+  border-radius: 8px;
+  background: #fff8f1;
+  font-size: 13px;
+}
+
+.consent-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.consent-checkbox input {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+
+.analytics-symptoms {
+  grid-column: 1 / -1;
+  padding: 17px;
+  border-radius: 13px;
+  background: #fff;
+}
+
+.analytics-symptoms p {
+  color: var(--muted);
+}
+
+.video-dialog {
+  width: min(900px, 94vw);
+}
+
+.video-tiles {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.video-tiles video {
+  width: 100%;
+  min-height: 180px;
+  max-height: 60vh;
+  border-radius: 12px;
+  background: #101b21;
+  object-fit: cover;
+}
+
 main > section[data-page]:not(.page-active) {
   display: none;
 }
@@ -523,6 +648,10 @@ dialog {
   .location-search-form > div {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .video-tiles {
+    grid-template-columns: 1fr;
   }
 
   .pharmacy-catalog-heading {

@@ -29,6 +29,7 @@ const pageTitles = {
   dashboard: "Dashboard",
   doctors: "Doctors",
   hospitals: "Hospitals",
+  doctor: "Doctor Dashboard",
   nearby: "Nearby care",
   "ai-tools": "AI tools",
   "ml-service": "ML service",
@@ -89,6 +90,140 @@ const api = async (endpoint, options = {}, retried = false) => {
       return api(endpoint, options, true);
     }
   }
+  const metricCard = (label, value) => `<article class="health-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
+  async function loadPatientWorkspace() {
+    const [analytics, reports, prescriptions] = await Promise.all([
+      api("patient/analytics"), api("patient/reports"), api("patient/prescriptions")
+    ]);
+    $("#patient-metrics").innerHTML = [
+      metricCard("Appointments", analytics.appointments),
+      metricCard("Completed", analytics.completed),
+      metricCard("Pending", analytics.pending),
+      metricCard("Reports", analytics.reports),
+      metricCard("Prescriptions", analytics.prescriptions)
+    ].join("");
+    $("#patient-reports").innerHTML = reports.length ? reports.map(report => `
+      <article class="appointment-card"><div><strong>${escapeHtml(report.filename)}</strong>
+        <p>${escapeHtml(new Date(report.createdAt).toLocaleString())}</p>
+        ${report.measurements?.length ? `<ul>${report.measurements.map(item =>
+          `<li>${escapeHtml(item.name)}: ${escapeHtml(item.value)} ${escapeHtml(item.unit)}</li>`).join("")}</ul>` : "<p>No common measurements were extracted. Review the original report.</p>"}
+        ${report.history?.conditions?.length ? `<p><strong>Conditions explicitly listed in report:</strong> ${report.history.conditions.map(escapeHtml).join(", ")}</p>` : ""}
+        ${report.history?.currentMedications?.length ? `<p><strong>Medicines explicitly listed in report:</strong> ${report.history.currentMedications.map(escapeHtml).join(", ")}</p>` : ""}
+        <small>${escapeHtml(report.extractionSource || "Stored encrypted; extraction not yet available.")} · Results may be incomplete and must be verified by a clinician.</small>
+        <p><a href="/api/reports/${report.id}/file" target="_blank" rel="noopener">Open original report</a></p></div></article>`).join("")
+      : '<p class="empty">No medical reports uploaded yet.</p>';
+    $("#patient-prescriptions").innerHTML = prescriptions.length ? prescriptions.map(prescription => `
+      <article class="appointment-card"><div><strong>Prescription from ${escapeHtml(prescription.doctorName || "your doctor")}</strong>
+        <p>${escapeHtml(new Date(prescription.createdAt).toLocaleString())}</p>
+        <ul>${prescription.items.map(item => `<li>${escapeHtml(item.medicine)} · ${escapeHtml(item.dosage)} · ${escapeHtml(item.duration)}${item.instructions ? ` · ${escapeHtml(item.instructions)}` : ""}</li>`).join("")}</ul>
+        ${prescription.instructions ? `<p>${escapeHtml(prescription.instructions)}</p>` : ""}
+        <a class="button button-outline" href="/api/prescriptions/${prescription.id}/pdf">Download PDF</a></div></article>`).join("")
+      : '<p class="empty">Your doctor has not issued a prescription yet.</p>';
+  }
+  async function loadAdminAnalytics() {
+    const [analytics, doctors] = await Promise.all([api("admin/analytics"), api("admin/doctors/unassigned")]);
+    $("#admin-analytics").innerHTML = [
+      metricCard("Patients", analytics.totalPatients),
+      metricCard("Consultations", analytics.consultations),
+      metricCard("Completed", `${analytics.completionRate}%`),
+      metricCard("Most requested specialty", analytics.mostRequestedSpecialty),
+      ...Object.entries(analytics.ageDistribution).map(([range, count]) => metricCard(`Patient age ${range}`, count))
+    ].join("") + `<div class="analytics-symptoms"><strong>Common symptom terms (patient-entered)</strong><p>${analytics.commonSymptoms.length
+      ? analytics.commonSymptoms.map(item => `${escapeHtml(item.symptom)} (${item.count})`).join(" · ")
+      : "Not enough data"}</p></div>`;
+    $("#doctor-account-form [name=doctorId]").innerHTML = doctors.length
+      ? doctors.map(doctor => `<option value="${doctor.id}">${escapeHtml(doctor.name)} · ${escapeHtml(doctor.specialty)}</option>`).join("")
+      : '<option value="">All directory doctors already have accounts</option>';
+  }
+  async function loadDoctorDashboard() {
+    if (currentPage !== "doctor" || state.user?.role !== "doctor") {
+      if (currentPage === "doctor") $("#doctor-appointments").innerHTML =
+        '<p class="empty">Sign in with an administrator-provisioned doctor account to access this workspace.</p>';
+      return;
+    }
+    try {
+      const [profile, appointments, analytics] = await Promise.all([
+        api("doctor/me"), api("doctor/appointments"), api("doctor/analytics")
+      ]);
+      $("#doctor-profile").textContent = `${profile.doctor.name} · ${profile.doctor.specialty}`;
+      $("#doctor-availability").value = (profile.doctor.schedule || []).join("\n");
+      $("#doctor-metrics").innerHTML = [
+        metricCard("Today's appointments", appointments.filter(item => new Date(item.date).toDateString() === new Date().toDateString()).length),
+        metricCard("Pending requests", analytics.pending),
+        metricCard("Total appointments", analytics.total),
+        metricCard("Completed", analytics.completed)
+      ].join("");
+      $("#doctor-appointments").innerHTML = appointments.length ? appointments.map(appointment => `
+        <article class="doctor-appointment-card"><div class="doctor-appointment-heading"><div><span class="doctor-meta">${escapeHtml(new Date(appointment.date).toLocaleString())} · ${escapeHtml(appointment.status)}</span>
+          <h3>${escapeHtml(appointment.patient?.name || "Patient")}</h3><p>${escapeHtml(appointment.patient?.email || "")}${appointment.patient?.phone ? ` · ${escapeHtml(appointment.patient.phone)}` : ""}</p>
+          <p><strong>Patient symptoms / reason:</strong> ${escapeHtml(appointment.symptoms || "Not provided")}</p>
+          ${appointment.notes ? `<p><strong>Patient note:</strong> ${escapeHtml(appointment.notes)}</p>` : ""}
+          ${appointment.reports?.length ? `<div><strong>Uploaded reports:</strong> ${appointment.reports.map(report =>
+            `<a href="/api/reports/${report.id}/file" target="_blank" rel="noopener">${escapeHtml(report.filename)}</a>`).join(" · ")}</div>` : "<p>No patient reports uploaded.</p>"}
+          ${appointment.prescriptionAvailable ? "<p>Prescription issued for this visit.</p>" : ""}
+        </div><div class="doctor-appointment-actions">
+          ${appointment.status === "Pending" ? `<button class="button button-primary" data-appointment-status="${appointment.id}" data-status="Accepted">Accept</button>
+            <button class="button button-outline" data-appointment-status="${appointment.id}" data-status="Rejected">Reject</button>` : ""}
+          ${appointment.status === "Accepted" ? `<button class="button button-primary" data-video-appointment="${appointment.id}">Start video consultation</button>
+            <button class="button button-outline" data-appointment-status="${appointment.id}" data-status="Completed">Mark completed</button>` : ""}
+        </div>
+        ${["Accepted", "Completed"].includes(appointment.status) ? `
+          <form class="clinical-entry-form" data-consultation="${appointment.id}"><label>Consultation notes<textarea name="notes" rows="3" maxlength="12000" required>${escapeHtml(appointment.consultationNotes || "")}</textarea></label><button class="button button-outline" type="submit">Save consultation notes</button></form>
+          <form class="clinical-entry-form" data-prescription="${appointment.id}"><strong>Prescription</strong>
+            <label>Medicine | dosage | duration | instructions<textarea name="items" rows="3" placeholder="Medicine name | 1 tablet | 5 days | After food" required></textarea></label>
+            <label>Additional instructions<textarea name="instructions" rows="2" maxlength="4000"></textarea></label>
+            <button class="button button-primary" type="submit">Issue or update prescription</button></form>` : ""}
+        </article>`).join("") : '<p class="empty">No appointments have been assigned to this doctor yet.</p>';
+      $("#doctor-appointments").querySelectorAll("[data-appointment-status]").forEach(button => {
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            await api(`doctor/appointments/${button.dataset.appointmentStatus}/status`, {
+              method: "POST", body: JSON.stringify({ status: button.dataset.status })
+            });
+            await loadDoctorDashboard();
+          } catch (error) {
+            showToast(error.message);
+            button.disabled = false;
+          }
+        });
+      });
+      $("#doctor-appointments").querySelectorAll("[data-consultation]").forEach(form => {
+        form.addEventListener("submit", async event => {
+          event.preventDefault();
+          const notes = new FormData(form).get("notes");
+          try {
+            await api(`doctor/appointments/${form.dataset.consultation}/consultation`, {
+              method: "PUT", body: JSON.stringify({ notes })
+            });
+            showToast("Consultation notes saved.");
+          } catch (error) { showToast(error.message); }
+        });
+      });
+      $("#doctor-appointments").querySelectorAll("[data-prescription]").forEach(form => {
+        form.addEventListener("submit", async event => {
+          event.preventDefault();
+          const body = Object.fromEntries(new FormData(form));
+          const items = String(body.items).split(/\r?\n/).filter(line => line.trim()).map(line => {
+            const [medicine = "", dosage = "", duration = "", instructions = ""] = line.split("|").map(part => part.trim());
+            return { medicine, dosage, duration, instructions };
+          });
+          try {
+            await api(`doctor/appointments/${form.dataset.prescription}/prescription`, {
+              method: "POST", body: JSON.stringify({ items, instructions: body.instructions })
+            });
+            showToast("Prescription saved for the patient.");
+            await loadDoctorDashboard();
+          } catch (error) { showToast(error.message); }
+        });
+      });
+      $("#doctor-appointments").querySelectorAll("[data-video-appointment]").forEach(button => {
+        button.addEventListener("click", () => startVideoCall(Number(button.dataset.videoAppointment), true));
+      });
+    } catch (error) {
+      $("#doctor-appointments").innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    }
+  }
   if (unsafe && ["login", "register", "logout"].includes(endpoint)) csrfToken = null; // session was replaced
   if (response.status === 204) return null;
   const data = await response.json();
@@ -121,6 +256,7 @@ function renderHeader() {
   document.body.classList.toggle("auth-required", !state.user);
   $("#user-label").textContent = state.user ? `Hi, ${state.user.name.split(" ")[0]}` : "";
   $("#auth-button").textContent = state.user ? "Sign out" : "Sign in";
+  $("#doctor-nav").hidden = state.user?.role !== "doctor";
   $("#admin-clinics").hidden = !state.user?.isAdmin;
   $("#admin-bootstrap-section").hidden = !state.user?.canBootstrapAdmin;
 }
@@ -135,6 +271,8 @@ function renderDepartments() {
     specialtyOptions.map(specialty => `<option value="${escapeHtml(specialty)}">${escapeHtml(specialty)}</option>`).join("");
   $("#clinic-form [name=doctorId]").innerHTML = state.doctors.map(doctor =>
     `<option value="${doctor.id}">${escapeHtml(doctor.name)} · ${escapeHtml(doctor.specialty)}</option>`).join("");
+  $("#doctor-account-form [name=doctorId]").innerHTML =
+    `<option value="">Loading available profiles…</option>`;
 }
 function renderDoctors() {
   const grid = $("#doctor-grid");
@@ -262,9 +400,22 @@ function renderProducts() {
   }));
 }
 async function loadAppointments() {
+  if (state.user?.role === "doctor") {
+    $("#appointment-list").innerHTML = '<p class="empty">Doctor accounts use the Doctor Dashboard to manage patient appointments.</p>';
+    renderAppointmentSuggestions();
+    await loadDoctorDashboard();
+    return;
+  }
+  if (state.user?.role === "admin") {
+    $("#appointment-list").innerHTML = '<p class="empty">Administrator accounts do not have a patient appointment list.</p>';
+    return;
+  }
   if (!state.user) {
     $("#appointment-list").innerHTML = '<p class="empty">Sign in to see your appointments.</p>';
     renderAppointmentSuggestions();
+    $("#patient-metrics").replaceChildren();
+    $("#patient-reports").replaceChildren();
+    $("#patient-prescriptions").replaceChildren();
     return;
   }
   try {
@@ -273,10 +424,17 @@ async function loadAppointments() {
       <div class="appointment-card"><div><strong>${escapeHtml(appointment.doctor?.name || appointment.providerName || "Doctor")}</strong>
       ${appointment.providerAddress ? `<p>${escapeHtml(appointment.providerAddress)}</p>` : ""}
       <p>${escapeHtml(new Date(appointment.date).toLocaleString())}${appointment.notes ? ` · ${escapeHtml(appointment.notes)}` : ""}</p>
+      ${appointment.symptoms ? `<p><strong>Reason for visit:</strong> ${escapeHtml(appointment.symptoms)}</p>` : ""}
+      ${appointment.consultationNotes ? `<p><strong>Doctor's consultation notes:</strong> ${escapeHtml(appointment.consultationNotes)}</p>` : ""}
       ${appointment.providerSource === "openstreetmap" ? '<p class="appointment-unconfirmed-note">Saved in your CareConnect list only. This request was not sent to the provider; contact them directly to confirm.</p>' : ""}
+      ${appointment.status === "Accepted" && appointment.doctorId ? `<button class="button button-primary" type="button" data-video-appointment="${appointment.id}">Join video consultation</button>` : ""}
       </div><span class="status">${escapeHtml(appointment.status)}</span></div>`).join("") :
       '<p class="empty">You have no appointments yet. Choose a specialist above to get started.</p>';
     renderAppointmentSuggestions();
+    await loadPatientWorkspace();
+    $("#appointment-list").querySelectorAll("[data-video-appointment]").forEach(button => {
+      button.addEventListener("click", () => startVideoCall(Number(button.dataset.videoAppointment), false));
+    });
   } catch (error) {
     showToast(error.message);
   }
@@ -362,7 +520,7 @@ function openAuth(mode = "signin", message = "") {
     <button class="${isRegister ? "active" : ""}" data-auth-mode="register">Create account</button></div>
     ${message ? `<p class="doctor-meta">${escapeHtml(message)}</p>` : ""}
     <form id="auth-form">${isRegister ? '<label>Full name<input name="name" maxlength="100" required></label>' : ""}
-    <label>Email<input name="email" type="email" required></label>${isRegister ? '<label>Phone<input name="phone" maxlength="40"></label>' : ""}
+    <label>Email<input name="email" type="email" required></label>${isRegister ? '<label>Phone<input name="phone" maxlength="40"></label><label>Date of birth <span>(optional, for age-range health analytics)</span><input name="dateOfBirth" type="date" max="${new Date().toISOString().slice(0, 10)}"></label>' : ""}
     <label>Password<input name="password" type="password" minlength="8" maxlength="128" required></label>
     <button class="button button-primary" type="submit">${isRegister ? "Create account" : "Sign in"}</button></form>`;
   if (!$("#auth-dialog").open) $("#auth-dialog").showModal();
@@ -374,7 +532,7 @@ function openAuth(mode = "signin", message = "") {
       const result = await api(isRegister ? "register" : "login", { method: "POST", body: JSON.stringify(body) });
       await saveUser(result.user);
       $("#auth-dialog").close();
-      navigateToPage("dashboard");
+      navigateToPage(result.user.role === "doctor" ? "doctor" : "dashboard");
       showToast(isRegister ? "Welcome to CareConnect." : "Welcome back.");
     } catch (error) {
       showToast(error.message);
@@ -431,7 +589,8 @@ function showRecommendation(result) {
   $("#recommendation-result").innerHTML = `<div class="result-panel"><strong>Suggested specialty: ${escapeHtml(result.specialty)}</strong>
     <p>${escapeHtml(result.rationale)}</p><p>Suggested timing: <b>${escapeHtml(result.urgency)}</b></p>
     ${matching.length ? `<p>Available specialists: ${matching.map(doctor => escapeHtml(doctor.name)).join(", ")}</p>` : ""}
-    <small>${escapeHtml(result.disclaimer)}</small></div>`;
+    <p><a class="button button-primary" href="/doctors">Find nearby doctors</a></p>
+    <small>Care navigation only; this is not a diagnosis or prescription. ${escapeHtml(result.disclaimer)}</small></div>`;
 }
 function showNoShowEstimate(result) {
   $("#no-show-result").innerHTML = `<div class="result-panel"><strong>${result.probability}% estimated no-show probability · ${escapeHtml(result.risk)} risk</strong>
@@ -539,6 +698,7 @@ async function loadManagedClinics() {
   try {
     state.clinics = await api("admin/clinics");
     renderManagedClinics();
+    await loadAdminAnalytics();
   } catch (error) {
     if (error.message !== "Administrator access is required.") showToast(error.message);
   }
@@ -883,6 +1043,158 @@ $("#chat-form").addEventListener("submit", async event => {
     $("#chat-clear").disabled = false;
   }
 });
+$("#report-upload-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!requireSignIn() || state.user.role !== undefined && state.user.role !== "patient") return;
+  const form = event.currentTarget;
+  const selected = $("#medical-report-file").files[0];
+  if (!selected) return showToast("Choose a report file first.");
+  const image = /\.(png|jpe?g|webp)$/i.test(selected.name);
+  if (image && !$("#report-ai-consent").checked) {
+    return showToast("Confirm that the image can be sent to Gemini for text extraction.");
+  }
+  setLoading(form, true, "Extracting and encrypting...");
+  try {
+    const report = await api("patient/reports", { method: "POST", body: new FormData(form) });
+    form.reset();
+    await loadPatientWorkspace();
+    showToast(`Report saved encrypted. Extracted ${report.measurements.length} measurement label(s); verify them against the original.`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setLoading(form, false);
+  }
+});
+$("#doctor-account-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!state.user?.isAdmin) return showToast("Administrator access is required.");
+  const form = event.currentTarget;
+  setLoading(form, true, "Creating doctor account...");
+  try {
+    const body = Object.fromEntries(new FormData(form));
+    const result = await api("admin/doctor-accounts", { method: "POST", body: JSON.stringify(body) });
+    form.reset();
+    showToast(`Doctor account created for ${result.doctor.name}. Give the temporary password to the clinician privately.`);
+    await loadAdminAnalytics();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setLoading(form, false);
+  }
+});
+$("#doctor-availability-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (state.user?.role !== "doctor") return;
+  const form = event.currentTarget;
+  setLoading(form, true, "Saving availability...");
+  try {
+    const schedule = String(new FormData(form).get("schedule") || "").split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+    await api("doctor/availability", { method: "PUT", body: JSON.stringify({ schedule }) });
+    showToast("Availability saved.");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setLoading(form, false);
+  }
+});
+let activeVideoCall = null;
+async function stopVideoCall() {
+  const call = activeVideoCall;
+  activeVideoCall = null;
+  if (!call) return;
+  clearInterval(call.pollTimer);
+  call.stream.getTracks().forEach(track => track.stop());
+  call.connection.close();
+  $("#local-video").srcObject = null;
+  $("#remote-video").srcObject = null;
+  $("#video-dialog").close();
+}
+async function startVideoCall(appointmentId, doctorStarts) {
+  if (!requireSignIn()) return;
+  if (activeVideoCall) await stopVideoCall();
+  $("#video-dialog").showModal();
+  $("#video-status").textContent = "Requesting camera and microphone permission…";
+  let requestedStream;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Video calls require a secure connection (localhost or HTTPS) and a camera-enabled browser.");
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    requestedStream = stream;
+    const connection = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const call = { appointmentId, stream, connection, cursor: 0, pollTimer: null, polling: false, candidates: [] };
+    activeVideoCall = call;
+    $("#local-video").srcObject = stream;
+    connection.addTrack(stream.getAudioTracks()[0], stream);
+    connection.addTrack(stream.getVideoTracks()[0], stream);
+    connection.ontrack = event => { $("#remote-video").srcObject = event.streams[0]; };
+    connection.onconnectionstatechange = () => {
+      $("#video-status").textContent = `Call status: ${connection.connectionState}. Media is not recorded by CareConnect.`;
+    };
+    connection.onicecandidate = event => {
+      if (event.candidate && activeVideoCall === call) {
+        api(`video/appointments/${appointmentId}/signals`, {
+          method: "POST", body: JSON.stringify({ signal: { type: "candidate", candidate: event.candidate } })
+        }).catch(error => showToast(error.message));
+      }
+    };
+    const applyQueuedCandidates = async () => {
+      while (call.candidates.length) await connection.addIceCandidate(call.candidates.shift());
+    };
+    const pollSignals = async () => {
+      if (call.polling || activeVideoCall !== call) return;
+      call.polling = true;
+      try {
+        const { signals } = await api(`video/appointments/${appointmentId}/signals?after=${call.cursor}`);
+        for (const envelope of signals) {
+          call.cursor = Math.max(call.cursor, envelope.id);
+          const signal = envelope.signal;
+          if (signal.type === "offer" && !doctorStarts) {
+            await connection.setRemoteDescription(signal.description);
+            await applyQueuedCandidates();
+            const answer = await connection.createAnswer();
+            await connection.setLocalDescription(answer);
+            await api(`video/appointments/${appointmentId}/signals`, {
+              method: "POST", body: JSON.stringify({ signal: { type: "answer", description: connection.localDescription } })
+            });
+            $("#video-status").textContent = "Connected to your doctor. This call is not recorded.";
+          } else if (signal.type === "answer" && doctorStarts) {
+            await connection.setRemoteDescription(signal.description);
+            await applyQueuedCandidates();
+            $("#video-status").textContent = "Connected to your patient. This call is not recorded.";
+          } else if (signal.type === "candidate") {
+            if (connection.remoteDescription) await connection.addIceCandidate(signal.candidate);
+            else call.candidates.push(signal.candidate);
+          }
+        }
+      } catch (error) {
+        if (activeVideoCall === call) $("#video-status").textContent = `Connection error: ${error.message}`;
+      } finally {
+        call.polling = false;
+      }
+    };
+    if (doctorStarts) {
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      await api(`video/appointments/${appointmentId}/signals`, {
+        method: "POST", body: JSON.stringify({ signal: { type: "offer", description: connection.localDescription } })
+      });
+      $("#video-status").textContent = "Calling patient… waiting for them to join.";
+    } else {
+      $("#video-status").textContent = "Waiting for the doctor to start the call…";
+    }
+    await pollSignals();
+    call.pollTimer = setInterval(pollSignals, 1000);
+  } catch (error) {
+    await stopVideoCall();
+    if (requestedStream && !activeVideoCall) requestedStream.getTracks().forEach(track => track.stop());
+    $("#video-dialog").close();
+    showToast(error.message);
+  }
+}
+$("#video-end").addEventListener("click", stopVideoCall);
+$("#video-dialog").addEventListener("cancel", event => { event.preventDefault(); stopVideoCall(); });
+$("#video-dialog [data-video-close]").addEventListener("click", stopVideoCall);
 function findMyLocation() {
   if (!requireSignIn()) return;
   $("#location-consent-dialog").showModal();

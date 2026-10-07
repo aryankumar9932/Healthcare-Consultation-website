@@ -8,6 +8,8 @@ const num = value => (value === null || value === undefined ? value : Number(val
 
 const mapUser = r => r && ({
   id: r.id, name: r.name, email: r.email, phone: r.phone, password: r.password,
+  ...(r.doctor_id ? { doctorId: r.doctor_id } : {}),
+  ...(r.date_of_birth ? { dateOfBirth: iso(r.date_of_birth) } : {}),
   ...(r.role !== "patient" ? { role: r.role } : {}), createdAt: iso(r.created_at)
 });
 const mapDoctor = r => r && ({
@@ -31,7 +33,9 @@ const mapClinicWithDoctor = r => r && ({
 const mapAppointment = r => r && ({
   id: r.id, userId: r.user_id, doctorId: r.doctor_id,
   ...(r.doctor_id ? {} : { providerName: r.provider_name, providerAddress: r.provider_address, providerSource: r.provider_source }),
-  date: iso(r.scheduled_for), notes: r.notes, status: r.status, createdAt: iso(r.created_at)
+  date: iso(r.scheduled_for), notes: r.notes, symptoms: r.symptoms || "",
+  consultationNotes: r.consultation_notes || "", completedAt: iso(r.completed_at),
+  status: r.status, createdAt: iso(r.created_at)
 });
 
 function createPgStore(connectionString, options = {}) {
@@ -102,14 +106,35 @@ function createPgStore(connectionString, options = {}) {
     async getUserByEmail(email) {
       return mapUser((await q("SELECT * FROM users WHERE lower(email)=lower($1)", [email])).rows[0]) || null;
     },
-    async createUser({ name, email, phone, password }) {
+    async createUser({ name, email, phone, password, dateOfBirth }) {
       try {
-        const { rows } = await q("INSERT INTO users(name,email,phone,password) VALUES ($1,$2,$3,$4) RETURNING *", [name, email, phone, password]);
+        const { rows } = await q("INSERT INTO users(name,email,phone,password,date_of_birth) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+          [name, email, phone, password, dateOfBirth || null]);
         return mapUser(rows[0]);
       } catch (error) {
         if (error.code === "23505") return null; // unique violation: duplicate email
         throw error;
       }
+    },
+    async createDoctorUser({ name, email, phone, password, doctorId }) {
+      try {
+        const { rows } = await q("INSERT INTO users(name,email,phone,password,role,doctor_id) VALUES ($1,$2,$3,$4,'doctor',$5) RETURNING *",
+          [name, email, phone, password, doctorId]);
+        return mapUser(rows[0]);
+      } catch (error) {
+        if (error.code === "23505") return null;
+        throw error;
+      }
+    },
+    async listDoctorsWithoutAccount() {
+      return (await q("SELECT d.* FROM doctors d LEFT JOIN users u ON u.doctor_id=d.id WHERE u.id IS NULL ORDER BY d.name")).rows.map(mapDoctor);
+    },
+    async getDoctorByUserId(userId) {
+      return mapDoctor((await q("SELECT d.* FROM doctors d JOIN users u ON u.doctor_id=d.id WHERE u.id=$1 AND u.role='doctor'", [userId])).rows[0]) || null;
+    },
+    async getDoctorAccountId(doctorId) {
+      const { rows } = await q("SELECT id FROM users WHERE doctor_id=$1 AND role='doctor'", [doctorId]);
+      return rows[0]?.id || null;
     },
     async setUserRole(id, role) {
       return mapUser((await q("UPDATE users SET role=$2 WHERE id=$1 RETURNING *", [id, role])).rows[0]) || null;
@@ -162,11 +187,133 @@ function createPgStore(connectionString, options = {}) {
       const { rows } = await q("SELECT count(*)::int AS total, count(*) FILTER (WHERE status='No-show')::int AS no_shows FROM appointments WHERE user_id=$1", [userId]);
       return { total: rows[0].total, noShows: rows[0].no_shows };
     },
-    async createAppointment({ userId, doctorId, providerName, providerAddress, providerSource, date, notes, status }) {
-      const { rows } = await q(`INSERT INTO appointments(user_id,doctor_id,provider_name,provider_address,provider_source,scheduled_for,notes,status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-        [userId, doctorId || null, doctorId ? null : providerName, doctorId ? null : providerAddress, doctorId ? null : providerSource, new Date(date), notes, status]);
+    async createAppointment({ userId, doctorId, providerName, providerAddress, providerSource, date, notes, symptoms, status }) {
+      const { rows } = await q(`INSERT INTO appointments(user_id,doctor_id,provider_name,provider_address,provider_source,scheduled_for,notes,symptoms,status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+        [userId, doctorId || null, doctorId ? null : providerName, doctorId ? null : providerAddress, doctorId ? null : providerSource, new Date(date), notes, symptoms || "", status]);
       return mapAppointment(rows[0]);
+    },
+    async listAppointmentsForDoctor(doctorId) {
+      const { rows } = await q(`SELECT a.*, u.id AS p_id, u.name AS p_name, u.email AS p_email, u.phone AS p_phone,
+          u.date_of_birth AS p_date_of_birth, d.department_id AS d_department_id, d.name AS d_name, d.specialty AS d_specialty,
+          d.bio AS d_bio, d.fee AS d_fee, d.image AS d_image, d.schedule AS d_schedule
+        FROM appointments a JOIN users u ON u.id=a.user_id LEFT JOIN doctors d ON d.id=a.doctor_id
+        WHERE a.doctor_id=$1 ORDER BY a.scheduled_for`, [doctorId]);
+      return rows.map(r => ({
+        ...mapAppointment(r),
+        patient: { id: r.p_id, name: r.p_name, email: r.p_email, phone: r.p_phone, dateOfBirth: iso(r.p_date_of_birth) },
+        doctor: r.doctor_id ? mapDoctor({ id: r.doctor_id, department_id: r.d_department_id, name: r.d_name, specialty: r.d_specialty,
+          bio: r.d_bio, fee: r.d_fee, image: r.d_image, schedule: r.d_schedule }) : null
+      }));
+    },
+    async getAppointmentForParticipant(appointmentId, userId) {
+      const { rows } = await q(`SELECT a.*, u.id AS p_id, u.name AS p_name, u.email AS p_email, u.phone AS p_phone,
+          u.date_of_birth AS p_date_of_birth, d.department_id AS d_department_id, d.name AS d_name, d.specialty AS d_specialty,
+          d.bio AS d_bio, d.fee AS d_fee, d.image AS d_image, d.schedule AS d_schedule
+        FROM appointments a JOIN users u ON u.id=a.user_id LEFT JOIN doctors d ON d.id=a.doctor_id
+        WHERE a.id=$1 AND (a.user_id=$2 OR EXISTS (SELECT 1 FROM users du WHERE du.id=$2 AND du.role='doctor' AND du.doctor_id=a.doctor_id))`,
+      [appointmentId, userId]);
+      const r = rows[0];
+      if (!r) return null;
+      return {
+        ...mapAppointment(r),
+        patient: { id: r.p_id, name: r.p_name, email: r.p_email, phone: r.p_phone, dateOfBirth: iso(r.p_date_of_birth) },
+        doctor: r.doctor_id ? mapDoctor({ id: r.doctor_id, department_id: r.d_department_id, name: r.d_name, specialty: r.d_specialty,
+          bio: r.d_bio, fee: r.d_fee, image: r.d_image, schedule: r.d_schedule }) : null
+      };
+    },
+    async updateAppointmentStatus(appointmentId, doctorId, expectedStatus, status) {
+      const { rows } = await q(`UPDATE appointments SET status=$3, completed_at=CASE WHEN $3='Completed' THEN now() ELSE completed_at END
+        WHERE id=$1 AND doctor_id=$2 AND status=$4 RETURNING *`, [appointmentId, doctorId, status, expectedStatus]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async saveConsultation(appointmentId, doctorId, patientId, notes) {
+      const { rows } = await q(`UPDATE appointments SET consultation_notes=$4
+        WHERE id=$1 AND doctor_id=$2 AND user_id=$3 RETURNING *`, [appointmentId, doctorId, patientId, notes]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async savePrescription(appointmentId, doctorId, patientId, encryptedData) {
+      const { rows } = await q(`INSERT INTO prescriptions(appointment_id,patient_id,doctor_user_id,encrypted_data)
+        SELECT a.id,a.user_id,$2,$4 FROM appointments a JOIN users u ON u.id=$2 AND u.doctor_id=a.doctor_id
+        WHERE a.id=$1 AND a.doctor_id=$3
+        ON CONFLICT (appointment_id) DO UPDATE SET encrypted_data=EXCLUDED.encrypted_data, created_at=now()
+        RETURNING id,appointment_id,patient_id,created_at`, [appointmentId, (await this.getDoctorAccountId(doctorId)), doctorId, encryptedData]);
+      const r = rows[0];
+      return r ? { id: r.id, appointmentId: r.appointment_id, patientId: r.patient_id, createdAt: iso(r.created_at) } : null;
+    },
+    async getDoctorAccountId(doctorId) {
+      const { rows } = await q("SELECT id FROM users WHERE doctor_id=$1 AND role='doctor'", [doctorId]);
+      return rows[0]?.id || null;
+    },
+    async listPrescriptionsForPatient(patientId) {
+      const { rows } = await q("SELECT * FROM prescriptions WHERE patient_id=$1 ORDER BY created_at DESC", [patientId]);
+      return rows.map(r => ({ id: r.id, appointmentId: r.appointment_id, patientId: r.patient_id, doctorId: r.doctor_user_id,
+        encryptedData: r.encrypted_data, createdAt: iso(r.created_at) }));
+    },
+    async saveMedicalReport({ patientId, uploadedBy, filename, mimeType, encryptedData }) {
+      const { rows } = await q(`INSERT INTO medical_reports(patient_id,uploaded_by,filename,mime_type,encrypted_data)
+        VALUES ($1,$2,$3,$4,$5) RETURNING id,patient_id,filename,mime_type,created_at`,
+      [patientId, uploadedBy, filename, mimeType, encryptedData]);
+      const r = rows[0];
+      return { id: r.id, patientId: r.patient_id, filename: r.filename, mimeType: r.mime_type, createdAt: iso(r.created_at) };
+    },
+    async listMedicalReportsForPatient(patientId) {
+      const { rows } = await q("SELECT id,patient_id,filename,mime_type,created_at FROM medical_reports WHERE patient_id=$1 ORDER BY created_at DESC", [patientId]);
+      return rows.map(r => ({ id: r.id, patientId: r.patient_id, filename: r.filename, mimeType: r.mime_type, createdAt: iso(r.created_at) }));
+    },
+    async getMedicalReportForParticipant(reportId, userId) {
+      const { rows } = await q(`SELECT r.* FROM medical_reports r WHERE r.id=$1 AND
+        (r.patient_id=$2 OR EXISTS (SELECT 1 FROM appointments a JOIN users u ON u.id=$2 AND u.role='doctor' AND u.doctor_id=a.doctor_id
+          WHERE a.user_id=r.patient_id))`, [reportId, userId]);
+      const r = rows[0];
+      return r ? { id: r.id, patientId: r.patient_id, filename: r.filename, mimeType: r.mime_type,
+        encryptedData: r.encrypted_data, createdAt: iso(r.created_at) } : null;
+    },
+    async doctorAnalytics(doctorId) {
+      const { rows } = await q(`SELECT count(*)::int AS total, count(*) FILTER (WHERE status='Completed')::int AS completed,
+        count(*) FILTER (WHERE status='Pending')::int AS pending FROM appointments WHERE doctor_id=$1`, [doctorId]);
+      return rows[0];
+    },
+    async patientAnalytics(patientId) {
+      const { rows } = await q(`SELECT (SELECT count(*)::int FROM appointments WHERE user_id=$1) AS appointments,
+        (SELECT count(*)::int FROM appointments WHERE user_id=$1 AND status='Completed') AS completed,
+        (SELECT count(*)::int FROM appointments WHERE user_id=$1 AND status='Pending') AS pending,
+        (SELECT count(*)::int FROM medical_reports WHERE patient_id=$1) AS reports,
+        (SELECT count(*)::int FROM prescriptions WHERE patient_id=$1) AS prescriptions`, [patientId]);
+      return rows[0];
+    },
+    async adminAnalytics() {
+      const { rows } = await q(`WITH appointment_counts AS (
+          SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE status='Completed')::int AS completed
+          FROM appointments
+        ), specialty_counts AS (
+          SELECT d.specialty, count(*)::int AS count FROM appointments a JOIN doctors d ON d.id=a.doctor_id
+          GROUP BY d.specialty ORDER BY count DESC, d.specialty LIMIT 1
+        ), symptom_words AS (
+          SELECT lower(word) AS symptom, count(*)::int AS count
+          FROM appointments a CROSS JOIN LATERAL regexp_split_to_table(a.symptoms, '[^[:alpha:]]+') word
+          WHERE length(word) >= 4 AND lower(word) NOT IN ('with','from','have','that','this','when','your','been','were','pain')
+          GROUP BY lower(word) ORDER BY count DESC, symptom LIMIT 10
+        )
+        SELECT (SELECT count(*)::int FROM users WHERE role='patient') AS "totalPatients",
+          c.total AS consultations, c.completed,
+          CASE WHEN c.total=0 THEN 0 ELSE round(c.completed*100.0/c.total)::int END AS "completionRate",
+          COALESCE((SELECT specialty FROM specialty_counts), 'Not available') AS "mostRequestedSpecialty",
+          (SELECT json_agg(json_build_object('symptom',symptom,'count',count)) FROM symptom_words) AS "commonSymptoms",
+          (SELECT json_build_object(
+            'under18',count(*) FILTER (WHERE date_of_birth > current_date - interval '18 years')::int,
+            '18to39',count(*) FILTER (WHERE date_of_birth <= current_date - interval '18 years' AND date_of_birth > current_date - interval '40 years')::int,
+            '40to64',count(*) FILTER (WHERE date_of_birth <= current_date - interval '40 years' AND date_of_birth > current_date - interval '65 years')::int,
+            '65plus',count(*) FILTER (WHERE date_of_birth <= current_date - interval '65 years')::int,
+            'unavailable',count(*) FILTER (WHERE date_of_birth IS NULL)::int)
+           FROM users WHERE role='patient') AS "ageDistribution"
+        FROM appointment_counts c`);
+      return { ...rows[0], commonSymptoms: rows[0].commonSymptoms || [] };
+    },
+    async updateDoctorAvailability(doctorId, schedule) {
+      const { rows } = await q("UPDATE doctors SET schedule=$2 WHERE id=$1 RETURNING *", [doctorId, JSON.stringify(schedule)]);
+      return mapDoctor(rows[0]) || null;
     },
 
     async listOrdersForUser(userId) {

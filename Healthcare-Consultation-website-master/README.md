@@ -15,7 +15,7 @@ npm start
 
 Open `http://localhost:3000`. Set a different port in PowerShell with `$env:PORT=3001; npm start`.
 
-Dashboard, Doctors, Hospitals, Nearby care, AI tools, ML service, Pharmacy, and My appointments each have their own URL and page view. Open them directly at `/dashboard`, `/doctors`, `/hospitals`, `/nearby`, `/ai-tools`, `/ml-service`, `/pharmacy`, and `/appointments`.
+Dashboard, Doctors, Hospitals, Nearby care, AI tools, ML service, Pharmacy, My appointments, and Doctor Dashboard each have their own URL and page view. Open them directly at `/dashboard`, `/doctors`, `/hospitals`, `/nearby`, `/ai-tools`, `/ml-service`, `/pharmacy`, `/appointments`, and `/doctor`.
 
 ## Nearby doctors and map routes
 
@@ -36,6 +36,24 @@ npm start
 ```
 
 The administrator enters the real clinic address; it is sent to Nominatim's public OpenStreetMap address search to place the clinic marker. Newly added or relocated clinics stay out of patient search until the administrator previews the pin on OpenStreetMap and confirms publication. The associated clinic and doctor must be in the existing catalogue. Nominatim is a public service subject to its usage policy; do not use it for bulk geocoding.
+
+## Doctor dashboard and care navigation
+
+The symptom tool is a navigation aid that suggests a specialist from patient-entered symptoms. It does not diagnose conditions, triage emergencies, or prescribe treatment. It links to the nearby doctor directory; recommendations and urgency suggestions can be wrong. Do not rely on the demo model for medical decisions or emergencies.
+
+Doctor access is not public self-registration. First bootstrap an administrator as described above. From the Dashboard, use “Create doctor account” to link a sign-in account to an unassigned doctor directory profile. Use a unique email and initial password of at least 12 characters, then deliver that password to the clinician privately. The app does not yet provide password changes or reset, so choose a strong unique password and treat it as a permanent credential. The doctor signs in through the regular sign-in dialog and opens `/doctor`. The dashboard is restricted to appointments assigned to that linked profile and supports request acceptance/rejection, symptom review, access to reports for patients with an appointment assigned to that doctor, consultation notes, prescriptions, completion, and availability. Patients see their appointment history, uploaded reports, measurements explicitly labeled in reports, issued prescriptions, and appointment-count analytics. Optional birth date is used only for broad age buckets in the administrator's aggregate analytics.
+
+Appointment statuses follow `Pending → Accepted/Rejected → Completed`; only the assigned doctor can make these transitions. The doctor can save notes and issue or update a prescription for an accepted/completed appointment. Patients can download a generated PDF from their appointment page. Prescription medicine names, dosage, duration, and instructions are entered by the doctor; CareConnect does not recommend a medicine or verify that a prescription is clinically appropriate.
+
+### Reports, encryption, and limits
+
+Patients can upload one PDF, DOCX, TXT, PNG, JPG, or WEBP report (up to 8 MB). Text is extracted locally from text-based PDFs, DOCX, and TXT. Scanned PDF OCR is not implemented. Image extraction sends the image to Gemini only after the patient explicitly checks the consent box and requires `GEMINI_API_KEY`. Extracted text is scanned for a small set of explicitly labeled values (hemoglobin, WBC, blood pressure, weight, and glucose) and explicit condition/medicine headings; it does not interpret ranges, make diagnoses, or infer missing values. Extraction can miss or misread information: always compare it with the original and have a clinician verify it.
+
+Uploaded report bytes, extracted report payloads, and prescription payloads are encrypted with AES-256-GCM before database storage; report filenames, MIME types, timestamps, and patient links remain plaintext metadata. Set a stable, private `REPORT_ENCRYPTION_KEY` in `.env` (for example, generate one with `openssl rand -hex 32`) and keep it backed up separately from the database. If unset, the app derives the encryption key from `SESSION_SECRET`; changing either key makes already stored clinical payloads unreadable. Key rotation/re-encryption tooling is not included. Appointment symptoms and notes remain ordinary database fields, so protect the database, backups, logs, and host; this demo is not a certified clinical-record system.
+
+### Video consultation
+
+Only participants in an accepted CareConnect appointment can exchange WebRTC offer/answer and ICE signaling. Audio/video is sent peer-to-peer through WebRTC's encrypted media transport; CareConnect does not record or store call media. The signaling queue is held in process memory for up to 15 minutes, so calls require both users to reach the same running app instance and cannot resume after a restart. A public STUN server is used for this demo; real deployments need a properly secured TURN service and shared signaling infrastructure for multi-instance operation. Camera/microphone access requires localhost or HTTPS. No call recording, waiting room, identity verification, or emergency service is provided.
 
 ## Enable online AI tools
 
@@ -115,4 +133,4 @@ Run the full test suite against PostgreSQL with `DATABASE_URL=... npm run test:p
 - **Account lockout:** 5 failed sign-ins lock an account for 15 minutes (`LOGIN_MAX_FAILURES`, `LOGIN_LOCK_MINUTES`); unknown emails are counted identically so the lock does not reveal which accounts exist. Failed sign-ins on unknown accounts take the same time as real ones.
 - **Sessions:** the session id is replaced on sign-in and registration (session fixation protection).
 
-Not yet covered: email verification and password reset, MFA, audit logging, field-level encryption of health data, and a shared rate-limit store.
+Not yet covered: email verification, password change/reset, MFA, audit logging, general field-level encryption of appointment data (appointment symptoms and notes remain plaintext), clinical-key rotation, and a shared rate-limit store.
