@@ -8,7 +8,7 @@ const savedCart = (() => {
 })();
 const state = {
   departments: [], doctors: [], products: [], clinics: [], osmProviders: [], nearbyClinics: [],
-  cart: savedCart, user: null, selectedDoctor: null, location: null, map: null,
+  cart: savedCart, user: null, selectedDoctor: null, selectedAppointmentProvider: null, location: null, map: null,
   markers: null, locationRequestId: 0, osmSearchError: ""
 };
 const chatHistory = [];
@@ -179,24 +179,91 @@ function renderProducts() {
 async function loadAppointments() {
   if (!state.user) {
     $("#appointment-list").innerHTML = '<p class="empty">Sign in to see your appointments.</p>';
+    renderAppointmentSuggestions();
     return;
   }
   try {
     const appointments = await api("appointments");
     $("#appointment-list").innerHTML = appointments.length ? appointments.map(appointment => `
-      <div class="appointment-card"><div><strong>${escapeHtml(appointment.doctor?.name || "Doctor")}</strong>
+      <div class="appointment-card"><div><strong>${escapeHtml(appointment.doctor?.name || appointment.providerName || "Doctor")}</strong>
+      ${appointment.providerAddress ? `<p>${escapeHtml(appointment.providerAddress)}</p>` : ""}
       <p>${escapeHtml(new Date(appointment.date).toLocaleString())}${appointment.notes ? ` · ${escapeHtml(appointment.notes)}` : ""}</p>
+      ${appointment.providerSource === "openstreetmap" ? '<p class="appointment-unconfirmed-note">Saved in your CareConnect list only. This request was not sent to the provider; contact them directly to confirm.</p>' : ""}
       </div><span class="status">${escapeHtml(appointment.status)}</span></div>`).join("") :
       '<p class="empty">You have no appointments yet. Choose a specialist above to get started.</p>';
+    renderAppointmentSuggestions();
   } catch (error) {
     showToast(error.message);
   }
+}
+function renderAppointmentSuggestions() {
+  const suggestions = $("#appointment-suggestions");
+  if (!state.user) {
+    suggestions.innerHTML = '<p class="empty">Sign in and share your location to see nearby doctor suggestions.</p>';
+    return;
+  }
+  if (!state.location) {
+    suggestions.innerHTML = '<p class="empty">Share your location to see nearby doctors and available booking options.</p>';
+    return;
+  }
+  const radius = Number($("#appointment-radius").value);
+  const providers = [
+    ...state.clinics.map(clinic => ({ ...clinic, source: "careconnect" })),
+    ...state.osmProviders.filter(provider => provider.category === "healthcare")
+  ];
+  const nearby = CareConnectGeo.findNearby(providers, state.location, radius);
+  if (!nearby.length) {
+    suggestions.innerHTML = `<p class="empty">No doctors or clinics were found within ${radius} km. Try a wider distance or refresh your location.</p>`;
+    return;
+  }
+  suggestions.innerHTML = `<p class="nearby-count">${nearby.length} nearby doctor${nearby.length === 1 ? "" : "s"} or clinic${nearby.length === 1 ? "" : "s"} within ${radius} km</p>
+    <div class="appointment-suggestion-list">${nearby.map(provider => {
+      const bookable = state.doctors.some(doctor => doctor.id === provider.doctor.id);
+      const directions = new URL("https://www.openstreetmap.org/directions");
+      directions.searchParams.set("engine", "fossgis_osrm_car");
+      directions.searchParams.set("route", `${state.location.latitude},${state.location.longitude};${provider.latitude},${provider.longitude}`);
+      return `<article class="appointment-suggestion-card"><div class="appointment-suggestion-copy">
+        <span class="doctor-meta">${provider.distanceKm.toFixed(1)} km away · ${provider.source === "openstreetmap" ? "OpenStreetMap listing" : "CareConnect clinic"}</span>
+        <h4>${escapeHtml(provider.doctor.name)}</h4><p class="appointment-specialty">${escapeHtml(provider.doctor.specialty)}</p>
+        ${provider.name && provider.name !== provider.doctor.name ? `<p><strong>${escapeHtml(provider.name)}</strong></p>` : ""}
+        <p>${escapeHtml(provider.address || "Address not listed")}</p>
+        ${provider.phone ? `<p><a href="tel:${escapeHtml(provider.phone.replace(/[^\d+(). -]/g, ""))}">${escapeHtml(provider.phone)}</a></p>` : ""}
+        </div><div class="appointment-suggestion-actions">
+          ${bookable ? `<button class="button button-primary" type="button" data-appointment-book="${provider.doctor.id}">Book appointment</button>` : ""}
+          ${provider.source === "openstreetmap" ? `<button class="button button-primary" type="button" data-appointment-request="${escapeHtml(provider.id)}">Request a time</button>` : ""}
+          <a class="button button-outline" href="${escapeHtml(directions.href)}" target="_blank" rel="noopener noreferrer">Get directions</a>
+          ${safeHttpsUrl(provider.mapURI) ? `<a class="appointment-listing-link" href="${escapeHtml(safeHttpsUrl(provider.mapURI))}" target="_blank" rel="noopener noreferrer">View listing</a>` : ""}
+        </div></article>`;
+    }).join("")}</div>`;
+  suggestions.querySelectorAll("[data-appointment-book]").forEach(button => {
+    button.addEventListener("click", () => openBooking(Number(button.dataset.appointmentBook)));
+  });
+  suggestions.querySelectorAll("[data-appointment-request]").forEach(button => {
+    button.addEventListener("click", () => openProviderAppointment(button.dataset.appointmentRequest));
+  });
 }
 function openBooking(id) {
   if (!state.user) return openAuth("signin", "Please sign in before booking an appointment.");
   state.selectedDoctor = state.doctors.find(doctor => doctor.id === id);
   if (!state.selectedDoctor) return showToast("That doctor is no longer available.");
+  state.selectedAppointmentProvider = null;
+  $("#booking-title").textContent = "Book an appointment";
   $("#booking-doctor").textContent = `${state.selectedDoctor.name} · ${state.selectedDoctor.specialty} · $${state.selectedDoctor.fee}`;
+  $("#booking-request-note").hidden = true;
+  $("#booking-submit").textContent = "Confirm appointment";
+  $("#booking-dialog").showModal();
+}
+function openProviderAppointment(providerId) {
+  if (!requireSignIn()) return;
+  const provider = state.osmProviders.find(item => String(item.id) === String(providerId) && item.category === "healthcare");
+  if (!provider) return showToast("That nearby listing is no longer available. Refresh your location and try again.");
+  state.selectedDoctor = null;
+  state.selectedAppointmentProvider = provider;
+  $("#booking-title").textContent = "Request an appointment time";
+  $("#booking-doctor").textContent = `${provider.doctor.name} · ${provider.doctor.specialty} · ${provider.address}`;
+  $("#booking-request-note").textContent = "This only saves your requested date and time in CareConnect. It does not contact or book the provider. Call or contact them directly to confirm availability.";
+  $("#booking-request-note").hidden = false;
+  $("#booking-submit").textContent = "Save requested time";
   $("#booking-dialog").showModal();
 }
 function openAuth(mode = "signin", message = "") {
@@ -465,6 +532,7 @@ function renderNearbyClinics() {
     category === "pharmacy" ? "" : specialty
   );
   renderDoctors();
+  renderAppointmentSuggestions();
   const directory = $("#nearby-content");
   if (!providers.length) {
     directory.innerHTML = `<p class="empty">No OpenStreetMap-listed providers were returned. Try refreshing your location.</p>${googleMapsFallback("hospitals doctors clinics dentists", "hospitals and doctors")}`;
@@ -500,7 +568,8 @@ function renderNearbyClinics() {
       ${clinic.openingHours ? `<p>Hours listed: ${escapeHtml(clinic.openingHours)}</p>` : ""}
       ${safeHttpsUrl(clinic.mapURI) ? `<a href="${escapeHtml(safeHttpsUrl(clinic.mapURI))}" target="_blank" rel="noopener noreferrer">View OpenStreetMap listing</a>` : ""}</div>
       <div class="nearby-actions"><button class="button button-outline" data-route-clinic="${escapeHtml(clinic.id)}">Open driving directions</button>
-      ${clinic.doctor.id ? `<button class="button button-primary" data-book="${clinic.doctor.id}">Book this doctor</button>` : ""}</div></article>`).join("")}</div>` :
+      ${clinic.doctor.id ? `<button class="button button-primary" data-book="${clinic.doctor.id}">Book this doctor</button>` :
+        clinic.category === "healthcare" && clinic.source === "openstreetmap" ? `<button class="button button-primary" data-request-provider="${escapeHtml(clinic.id)}">Request a time</button>` : ""}</div></article>`).join("")}</div>` :
     '<p class="empty">No providers match this specialty and distance. Try another filter or a wider radius.</p>'}`;
   if (!state.nearbyClinics.length) {
     directory.insertAdjacentHTML("beforeend", category === "pharmacy"
@@ -509,6 +578,7 @@ function renderNearbyClinics() {
   }
   document.querySelectorAll("[data-route-clinic]").forEach(button => button.addEventListener("click", () => showDrivingRoute(button.dataset.routeClinic, button)));
   document.querySelectorAll("#nearby-content [data-book]").forEach(button => button.addEventListener("click", () => openBooking(Number(button.dataset.book))));
+  document.querySelectorAll("#nearby-content [data-request-provider]").forEach(button => button.addEventListener("click", () => openProviderAppointment(button.dataset.requestProvider)));
   createMap();
 }
 async function showDrivingRoute(clinicId, button) {
@@ -538,6 +608,8 @@ $("#cart-button").addEventListener("click", () => {
 $("#pharmacy-find-button").addEventListener("click", findMedicalStores);
 $("#pharmacy-radius").addEventListener("change", renderPharmacyStores);
 $("#locate-button").addEventListener("click", findMyLocation);
+$("#appointment-locate-button").addEventListener("click", findMyLocation);
+$("#appointment-radius").addEventListener("change", renderAppointmentSuggestions);
 $("#nearby-specialty").addEventListener("change", renderNearbyClinics);
 $("#nearby-category").addEventListener("change", renderNearbyClinics);
 $("#nearby-radius").addEventListener("change", renderNearbyClinics);
@@ -593,14 +665,28 @@ $("#cancel-clinic-edit").addEventListener("click", clearManagedClinics);
 $("#booking-form").addEventListener("submit", async event => {
   event.preventDefault();
   const body = Object.fromEntries(new FormData(event.target));
-  body.doctorId = state.selectedDoctor.id;
+  if (state.selectedDoctor) {
+    body.doctorId = state.selectedDoctor.id;
+  } else if (state.selectedAppointmentProvider) {
+    body.providerName = state.selectedAppointmentProvider.doctor.name;
+    body.providerAddress = state.selectedAppointmentProvider.address;
+    body.providerSource = state.selectedAppointmentProvider.source;
+    body.providerCategory = state.selectedAppointmentProvider.category;
+  } else {
+    showToast("Choose a doctor or nearby healthcare provider first.");
+    return;
+  }
   try {
     await api("appointments", { method: "POST", body: JSON.stringify(body) });
+    const externalRequest = Boolean(state.selectedAppointmentProvider);
     $("#booking-dialog").close();
     event.target.reset();
     await loadAppointments();
     location.hash = "appointments";
-    showToast("Appointment booked successfully.");
+    state.selectedAppointmentProvider = null;
+    showToast(externalRequest
+      ? "Requested time saved in your list. Contact the provider directly to confirm."
+      : "Appointment booked successfully.");
   } catch (error) {
     showToast(error.message);
   }
@@ -740,6 +826,7 @@ function requestUserLocation() {
     try {
       renderNearbyClinics();
       renderPharmacyStores();
+      renderAppointmentSuggestions();
     } catch (error) {
       showToast(error.message);
     }
@@ -759,6 +846,7 @@ function clearLocation() {
   state.osmProviders = [];
   state.osmSearchError = "";
   state.nearbyClinics = [];
+  renderAppointmentSuggestions();
   if (state.map) {
     state.map.remove();
     state.map = null;

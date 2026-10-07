@@ -99,12 +99,24 @@
       <div id="pharmacy-nearby-results" class="pharmacy-nearby-results" aria-live="polite"><p class="empty">Sign in and choose “Find stores near me” to search nearby pharmacies.</p></div>
       <div class="pharmacy-catalog-heading"><div><p class="eyebrow">CAREFULLY SELECTED</p><h2>Catalogue medicines</h2></div><p>Sample catalogue products and prices. Availability must be confirmed with the store.</p></div>
       <div id="product-grid" class="product-grid"></div></section>
-    <section class="section soft" id="appointments"><div class="section-heading"><div><p class="eyebrow">YOUR CARE JOURNEY</p><h2>Appointments</h2></div></div><div id="appointment-list" class="appointment-list"><p class="empty">Sign in to see your appointments.</p></div></section>
+    <section class="section soft" id="appointments">
+      <div class="section-heading"><div><p class="eyebrow">YOUR CARE JOURNEY</p><h2>Appointments</h2></div><p>Manage your bookings and discover nearby doctors from your shared location.</p></div>
+      <div class="appointment-recommendations">
+        <div class="appointment-recommendation-heading"><div><p class="eyebrow">NEAR YOU</p><h3>Suggested nearby doctors</h3></div>
+          <label for="appointment-radius">Within<select id="appointment-radius"><option value="5">5 km</option><option value="10">10 km</option><option value="25" selected>25 km</option><option value="50">50 km</option></select></label>
+        </div>
+        <p class="appointment-recommendation-note">Nearby results use your location only after you consent. You can record a requested date and time for an OpenStreetMap listing, but the request is not sent to the provider and is not a confirmed booking. Contact the provider directly to arrange and confirm your visit.</p>
+        <div id="appointment-suggestions" class="appointment-suggestions" aria-live="polite"><p class="empty">Sign in and share your location to see nearby doctor suggestions.</p></div>
+        <button id="appointment-locate-button" class="button button-outline" type="button">Find doctors near me</button>
+      </div>
+      <div class="appointment-list-heading"><h3>Your bookings</h3></div>
+      <div id="appointment-list" class="appointment-list"><p class="empty">Sign in to see your appointments.</p></div>
+    </section>
   </main>
   <footer><div class="brand"><span class="brand-mark">+</span><span>Care<span>Connect</span></span></div><p>Making better healthcare easier to access.</p><p class="footer-note">AI features use Google's Gemini API. Prompts and submitted documents are sent online and outputs are informational only.</p></footer>
   <div id="toast" class="toast"></div>
   <dialog id="auth-dialog" aria-label="Sign in or create an account"><button class="dialog-close" data-close>×</button><div id="auth-content"></div></dialog>
-  <dialog id="booking-dialog"><button class="dialog-close" data-close>×</button><h2>Book an appointment</h2><p id="booking-doctor"></p><form id="booking-form"><label>Date and time<input name="date" type="datetime-local" required></label><label>Anything we should know? <span>(optional)</span><textarea name="notes" rows="3"></textarea></label><button class="button button-primary" type="submit">Confirm appointment</button></form></dialog>
+  <dialog id="booking-dialog"><button class="dialog-close" data-close>×</button><h2 id="booking-title">Book an appointment</h2><p id="booking-doctor"></p><p id="booking-request-note" class="booking-request-note" hidden></p><form id="booking-form"><label>Date and time<input name="date" type="datetime-local" required></label><label>Anything we should know? <span>(optional)</span><textarea name="notes" rows="3"></textarea></label><button id="booking-submit" class="button button-primary" type="submit">Confirm appointment</button></form></dialog>
   <dialog id="cart-dialog"><button class="dialog-close" data-close>×</button><h2>Your cart</h2><div id="cart-content"></div></dialog>
   <dialog id="location-consent-dialog" class="location-consent-dialog" aria-labelledby="location-consent-title">
     <h2 id="location-consent-title">Find doctors and medical stores near you?</h2>

@@ -414,16 +414,33 @@ function createApp() {
   app.post("/api/appointments", requireUser, (req, res) => {
     const body = req.body || {};
     const db = readDb();
-    const doctor = db.doctors.find(item => item.id === Number(body.doctorId));
+    const requestedDoctorId = Number(body.doctorId);
+    const doctor = Number.isSafeInteger(requestedDoctorId) && requestedDoctorId > 0
+      ? db.doctors.find(item => item.id === requestedDoctorId)
+      : null;
     const date = String(body.date || "");
-    if (!doctor || !validDate(date)) return res.status(400).json({ error: "Choose a doctor and a future appointment date." });
+    const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
+    const providerAddress = typeof body.providerAddress === "string" ? body.providerAddress.trim() : "";
+    const externalProvider = !doctor &&
+      body.providerSource === "openstreetmap" &&
+      body.providerCategory === "healthcare" &&
+      providerName.length >= 2 && providerName.length <= 160 &&
+      providerAddress.length <= 300;
+    if ((!doctor && !externalProvider) || !validDate(date)) {
+      return res.status(400).json({ error: "Choose a listed doctor or nearby healthcare provider and a future appointment date." });
+    }
     const appointment = {
       id: idFor(db.appointments),
       userId: req.user.id,
-      doctorId: doctor.id,
+      doctorId: doctor ? doctor.id : null,
+      ...(doctor ? {} : {
+        providerName,
+        providerAddress,
+        providerSource: "openstreetmap"
+      }),
       date,
       notes: String(body.notes || "").trim().slice(0, 1000),
-      status: "Pending",
+      status: doctor ? "Pending" : "Request saved · unconfirmed",
       createdAt: new Date().toISOString()
     };
     db.appointments.push(appointment);

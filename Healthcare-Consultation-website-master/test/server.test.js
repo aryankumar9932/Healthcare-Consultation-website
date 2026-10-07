@@ -190,6 +190,43 @@ test("books appointments in the authenticated session and reports missing Gemini
   assert.equal(list.length, 1);
   assert.equal(list[0].doctor.name, "Dr. Halima");
 
+  const nearbyRequest = await fetch(`${baseUrl}/api/appointments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: sessionCookie },
+    body: JSON.stringify({
+      providerName: "Community Hospital",
+      providerAddress: "12 Main Street, Test City",
+      providerSource: "openstreetmap",
+      providerCategory: "healthcare",
+      date: appointmentDate,
+      notes: "Requested from nearby search"
+    })
+  });
+  assert.equal(nearbyRequest.status, 201);
+  const savedRequest = await nearbyRequest.json();
+  assert.equal(savedRequest.doctorId, null);
+  assert.equal(savedRequest.providerName, "Community Hospital");
+  assert.equal(savedRequest.providerAddress, "12 Main Street, Test City");
+  assert.equal(savedRequest.status, "Request saved · unconfirmed");
+
+  const appointmentsAfterRequest = await fetch(`${baseUrl}/api/appointments`, { headers: { Cookie: sessionCookie } });
+  const updatedList = await appointmentsAfterRequest.json();
+  assert.equal(updatedList.length, 2);
+  assert.equal(updatedList[1].providerName, "Community Hospital");
+
+  const invalidNearbyRequest = await fetch(`${baseUrl}/api/appointments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: sessionCookie },
+    body: JSON.stringify({
+      providerName: "Community Hospital",
+      providerAddress: "12 Main Street, Test City",
+      providerSource: "forged",
+      providerCategory: "healthcare",
+      date: appointmentDate
+    })
+  });
+  assert.equal(invalidNearbyRequest.status, 400);
+
   const modelResponse = await fetch(`${baseUrl}/api/ml/recommendations`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Cookie: sessionCookie },

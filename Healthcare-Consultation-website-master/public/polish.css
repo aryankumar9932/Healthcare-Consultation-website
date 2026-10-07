@@ -902,6 +902,161 @@ button.button-outline:hover {
   color: #8e1010;
 }
 
+.appointment-recommendations {
+  margin: 0 0 36px;
+  padding: clamp(20px, 3vw, 30px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: var(--surface-shadow);
+}
+
+.appointment-recommendation-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.appointment-recommendation-heading h3,
+.appointment-list-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 22px;
+}
+
+.appointment-recommendation-heading .eyebrow {
+  margin-bottom: 5px;
+}
+
+.appointment-recommendation-heading label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+
+.appointment-recommendation-heading select {
+  min-width: 100px;
+}
+
+.appointment-recommendation-note {
+  max-width: 760px;
+  margin: 12px 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.appointment-suggestion-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 15px 0 20px;
+}
+
+.appointment-suggestion-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.appointment-suggestion-copy {
+  min-width: 0;
+}
+
+.appointment-suggestion-copy h4 {
+  margin: 7px 0 3px;
+  font-size: 17px;
+}
+
+.appointment-suggestion-copy p {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.appointment-suggestion-copy .appointment-specialty {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.appointment-suggestion-copy a {
+  color: #0369a1;
+}
+
+.appointment-suggestion-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
+}
+
+.appointment-suggestion-actions .button {
+  text-align: center;
+}
+
+.appointment-list-heading {
+  margin: 28px 0 16px;
+}
+
+.appointment-unconfirmed-note,
+.booking-request-note {
+  max-width: 680px;
+  padding: 10px 12px;
+  border-left: 3px solid #0284c7;
+  border-radius: 0 8px 8px 0;
+  background: #e0f2fe;
+  color: #334155;
+  font-size: 12px;
+}
+
+.appointment-unconfirmed-note {
+  margin-top: 10px;
+}
+
+.booking-request-note {
+  margin: 12px 0;
+}
+
+@media (max-width: 760px) {
+  .appointment-suggestion-list {
+    grid-template-columns: 1fr;
+  }
+
+  .appointment-suggestion-card {
+    flex-direction: column;
+  }
+
+  .appointment-suggestion-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .appointment-suggestion-actions .button {
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .appointment-recommendation-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .appointment-recommendation-heading label {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
 input,
 select,
 textarea {
