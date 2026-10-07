@@ -42,9 +42,20 @@ nav a {
   transition: color 160ms ease;
 }
 
+nav .nav-ml-link {
+  padding: 9px 13px;
+  color: #fff;
+  text-decoration: none;
+}
+
 nav a:hover,
 nav a:focus-visible {
   color: var(--teal);
+}
+
+nav .nav-ml-link:hover,
+nav .nav-ml-link:focus-visible {
+  color: #fff;
 }
 
 .header-actions {
@@ -121,6 +132,36 @@ nav a:focus-visible {
 
 .section-heading > p {
   line-height: 1.7;
+}
+
+.ml-service-section {
+  background: #f4f9fc;
+}
+
+.ml-service-notice {
+  max-width: 900px;
+  margin: 0 auto 22px;
+  padding: 17px 20px;
+  border: 1px solid #c8e7f5;
+  border-left: 4px solid #38bdf8;
+  border-radius: 12px;
+  background: #f0f9ff;
+}
+
+.ml-service-notice p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.ml-service-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.document-reader-grid {
+  grid-template-columns: minmax(0, 820px);
+  justify-content: center;
 }
 
 .department-card,
@@ -1097,9 +1138,26 @@ footer {
     background: #fff;
   }
 
+  nav .nav-ml-link {
+    border-color: #0b4a7d;
+    background: #0b4a7d;
+  }
+
   nav a:hover,
   nav a:focus-visible {
     border-color: #7dd3fc;
     background: #e0f2fe;
+  }
+
+  nav .nav-ml-link:hover,
+  nav .nav-ml-link:focus-visible {
+    border-color: #0b4a7d;
+    background: #0b4a7d;
+  }
+}
+
+@media (max-width: 680px) {
+  .ml-service-grid {
+    grid-template-columns: 1fr;
   }
 }

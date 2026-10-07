@@ -695,7 +695,7 @@ $("#recommendation-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (!requireSignIn()) return;
   const form = event.currentTarget;
-  setLoading(form, true, "Asking Gemini online...");
+  setLoading(form, true, "Checking available models...");
   $("#recommendation-result").textContent = "";
   try {
     showRecommendation(await api("ml/recommendations", {

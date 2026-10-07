@@ -13,7 +13,7 @@
   <header class="topbar">
     <a class="brand" href="#dashboard"><span class="brand-mark">+</span><span>Care<span>Connect</span></span></a>
     <nav>
-      <a href="#dashboard">Dashboard</a><a href="#doctors">Doctors</a><a href="#nearby">Nearby care</a><a href="#ai-tools">AI tools</a><a href="#pharmacy">Pharmacy</a><a href="#appointments">My appointments</a>
+      <a href="#dashboard">Dashboard</a><a href="#doctors">Doctors</a><a href="#nearby">Nearby care</a><a href="#ai-tools">AI tools</a><a class="button button-primary nav-ml-link" href="#ml-service">ML service</a><a href="#pharmacy">Pharmacy</a><a href="#appointments">My appointments</a>
     </nav>
     <div class="header-actions"><span id="user-label"></span><button id="auth-button" class="button button-outline">Sign in</button><button id="cart-button" class="cart">Cart <b id="cart-count">0</b></button></div>
   </header>
@@ -52,8 +52,26 @@
       </form>
       <div id="managed-clinics" class="managed-clinics"></div>
     </section>
+    <section class="section ml-service-section" id="ml-service">
+      <div class="section-heading"><div><p class="eyebrow">CARECONNECT ML SERVICE</p><h2>Local model tools</h2></div><p>Use the optional CareConnect ML service for specialty suggestions and experimental appointment attendance estimates.</p></div>
+      <div class="ml-service-notice"><strong>Demo models only</strong><p>Models use synthetic data and are not clinically validated. Low-confidence specialty suggestions or an unavailable service fall back to Gemini, which receives the symptom text. Never use attendance estimates to deny, delay, penalize, or overbook care.</p></div>
+      <div class="ai-grid ml-service-grid">
+        <article class="ai-card">
+          <p class="ai-number">01 · CARE NAVIGATION</p><h3>Find a starting point</h3>
+          <p>Describe what you would like help with and get a general specialty suggestion. The local model is used when available and confident.</p>
+          <form id="recommendation-form"><label for="symptoms">What would you like help with?</label><textarea id="symptoms" name="symptoms" rows="4" maxlength="1500" required placeholder="Describe your concern (avoid sharing identifying details)"></textarea><button class="button button-primary" type="submit">Suggest a specialty</button></form>
+          <div id="recommendation-result" class="ai-result" aria-live="polite"></div>
+        </article>
+        <article class="ai-card">
+          <p class="ai-number">02 · APPOINTMENT PLANNING</p><h3>Explore attendance factors</h3>
+          <p>Get an experimental estimate based on appointment timing and your booking history. Use it only to consider an extra reminder.</p>
+          <form id="no-show-form"><label for="prediction-doctor">Specialist<select id="prediction-doctor" name="doctorId" required></select></label><label for="prediction-date">Appointment date and time<input id="prediction-date" name="date" type="datetime-local" required></label><button class="button button-primary" type="submit">Estimate attendance risk</button></form>
+          <div id="no-show-result" class="ai-result" aria-live="polite"></div>
+        </article>
+      </div>
+    </section>
     <section class="section ai-section" id="ai-tools">
-      <div class="section-heading"><div><p class="eyebrow">ONLINE AI</p><h2>Helpful tools for your care journey</h2></div><p>These tools send your prompts and any submitted document content to Google's Gemini API for processing. Use only if you agree to the provider's data terms.</p></div>
+      <div class="section-heading"><div><p class="eyebrow">ONLINE AI</p><h2>Helpful tools for your care journey</h2></div><p>The health chat and document reader send your prompts and submitted document content to Google's Gemini API for processing. Use only if you agree to the provider's data terms.</p></div>
       <article class="ai-card ai-chat-card">
         <div class="chat-heading"><div><p class="ai-number">ASK A HEALTH QUESTION</p><h3>CareConnect AI chat</h3></div><button id="chat-clear" class="button button-outline" type="button">New chat</button></div>
         <p>Ask general health questions or attach a document, prescription, or image for help understanding it. You can ask when to seek care; this chat cannot select medicines or create a dose or medication schedule.</p>
@@ -67,19 +85,7 @@
         </form>
         <p class="chat-privacy">Chat messages and attachments are sent to Google's Gemini API for processing and are not saved by CareConnect. Do not submit information unless you accept Google's privacy and data-use terms. AI can be wrong; confirm health and medicine questions with a qualified clinician or pharmacist.</p>
       </article>
-      <div class="ai-grid">
-        <article class="ai-card">
-          <p class="ai-number">01 · CARE NAVIGATION</p><h3>Find a starting point</h3>
-          <p>Describe what you would like help with and get a general specialty suggestion.</p>
-          <form id="recommendation-form"><label for="symptoms">What would you like help with?</label><textarea id="symptoms" name="symptoms" rows="4" maxlength="1500" required placeholder="Describe your concern (avoid sharing identifying details)"></textarea><button class="button button-primary" type="submit">Suggest a specialty</button></form>
-          <div id="recommendation-result" class="ai-result" aria-live="polite"></div>
-        </article>
-        <article class="ai-card">
-          <p class="ai-number">02 · APPOINTMENT PLANNING</p><h3>Explore attendance factors</h3>
-          <p>Get an experimental estimate based on appointment timing and your booking history.</p>
-          <form id="no-show-form"><label for="prediction-doctor">Specialist<select id="prediction-doctor" name="doctorId" required></select></label><label for="prediction-date">Appointment date and time<input id="prediction-date" name="date" type="datetime-local" required></label><button class="button button-primary" type="submit">Estimate attendance risk</button></form>
-          <div id="no-show-result" class="ai-result" aria-live="polite"></div>
-        </article>
+      <div class="ai-grid document-reader-grid">
         <article class="ai-card">
           <p class="ai-number">03 · DOCUMENT READER</p><h3>Read a document or prescription</h3>
           <p>Paste text or upload a PDF, DOCX, TXT, or document image. It is sent to Gemini for analysis and is not saved by CareConnect.</p>
