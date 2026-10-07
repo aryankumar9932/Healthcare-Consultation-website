@@ -15,6 +15,8 @@ npm start
 
 Open `http://localhost:3000`. Set a different port in PowerShell with `$env:PORT=3001; npm start`.
 
+Dashboard, Doctors, Nearby care, AI tools, ML service, Pharmacy, and My appointments each have their own URL and page view. Open them directly at `/dashboard`, `/doctors`, `/nearby`, `/ai-tools`, `/ml-service`, `/pharmacy`, and `/appointments`.
+
 ## Nearby doctors and map routes
 
 After signing in, the site offers an explicit location-sharing confirmation. If accepted, approve the browser location prompt to search OpenStreetMap for nearby doctors, clinics, dentists, hospitals, and pharmacies/medical stores. Use the Type filter to show medical stores only, healthcare only, or both. Pharmacy lookup includes the OpenStreetMap `amenity=pharmacy`, `healthcare=pharmacy`, and `shop=chemist` tags and uses a separate result limit so healthcare listings do not crowd out pharmacies. Listings are community-maintained and may be incomplete or outdated. When nearby OSM results are empty, optional links open Google Maps searches for local hospitals/doctors or pharmacies; those links do not fetch Google data into CareConnect and send the selected location to Google when opened. Fetching Google Places results inside CareConnect requires your own Google Maps Platform API key and billing-enabled project. Coordinates are sent to the CareConnect server and Overpass API for the search and are not saved by CareConnect. Map tiles use OpenStreetMap; driving directions open OpenStreetMap's public directions service. This uses public services without a Google Maps API key and is subject to their attribution requirements, usage policies, availability, and rate limits. Location search requires localhost or HTTPS.
@@ -86,8 +88,31 @@ See [REVIEW_AND_ROADMAP.md](./REVIEW_AND_ROADMAP.md) for limitations and recomme
 
 ## Production configuration
 
-Set `NODE_ENV=production` and provide a long, random `SESSION_SECRET` before launch. The session cookie is HTTP-only, SameSite=Lax, and marked Secure in production. The default Express session store is in-memory and intended for local development only; configure a persistent production session store, HTTPS, and persistent storage/backup for the JSON database before deployment. The included JSON store is intended for a small demonstration, not concurrent or regulated production workloads.
+Set `NODE_ENV=production` and provide a long, random `SESSION_SECRET` before launch. The session cookie is HTTP-only, SameSite=Lax, and marked Secure in production. Set `DATABASE_URL` in production: PostgreSQL stores the data and the sessions (see "Database (PostgreSQL)" below). Without it the app falls back to an in-memory session store and the JSON file, which are for local development and small demonstrations only. Serve the site over HTTPS and back up the database.
 
 The legacy PHP payment endpoints require `SSLCOMMERZ_STORE_ID` and `SSLCOMMERZ_STORE_PASSWORD` in the PHP process environment. No payment credentials are included in the repository.
 
 Run the available unit tests with `npm test`.
+
+## Database (PostgreSQL)
+
+By default the app stores data in `data/db.json` (development/demo only). Set `DATABASE_URL` to use PostgreSQL; migrations in `db/migrations/` run automatically at start-up (or run `npm run migrate`), the starter catalogue is seeded once, and sessions are stored in the database so they survive restarts and work across several app instances.
+
+```bash
+docker compose up --build        # web + PostgreSQL + ML service (see .env.example for required secrets)
+# or locally:
+DATABASE_URL=postgres://user:pass@localhost:5432/careconnect npm start
+```
+
+Moving existing JSON data (keeps ids and password hashes): `DATABASE_URL=... npm run import:json -- data/db.json --force` (the `--force` flag wipes the target tables first).
+Run the full test suite against PostgreSQL with `DATABASE_URL=... npm run test:pg` (this **truncates** the user, appointment, order and clinic tables, so use a throw-away database).
+
+## Security controls
+
+- **Headers / CSP:** `helmet` with a strict Content-Security-Policy (no inline scripts or styles), HSTS in production, `frame-ancestors 'none'`, Permissions-Policy. Leaflet assets are loaded with Subresource Integrity.
+- **CSRF:** every state-changing `/api` request needs the `X-CSRF-Token` header (get it from `GET /api/csrf`); the bundled frontend does this automatically. Cookies are also `HttpOnly` + `SameSite=Lax` (+ `Secure` in production).
+- **Rate limiting:** per client IP: 600 API requests / 15 min, 20 sign-in or register attempts / 15 min, 60 AI requests / hour (override with `RATE_LIMIT_*`). Limits are in memory per instance; use a shared store (e.g. Redis) when running several instances. Set `TRUST_PROXY=1` behind a reverse proxy so the real client IP is used.
+- **Account lockout:** 5 failed sign-ins lock an account for 15 minutes (`LOGIN_MAX_FAILURES`, `LOGIN_LOCK_MINUTES`); unknown emails are counted identically so the lock does not reveal which accounts exist. Failed sign-ins on unknown accounts take the same time as real ones.
+- **Sessions:** the session id is replaced on sign-in and registration (session fixation protection).
+
+Not yet covered: email verification and password reset, MFA, audit logging, field-level encryption of health data, and a shared rate-limit store.

@@ -13,6 +13,27 @@ const state = {
 };
 const chatHistory = [];
 const $ = selector => document.querySelector(selector);
+const pageTitles = {
+  dashboard: "Dashboard",
+  doctors: "Doctors",
+  nearby: "Nearby care",
+  "ai-tools": "AI tools",
+  "ml-service": "ML service",
+  pharmacy: "Pharmacy",
+  appointments: "My appointments"
+};
+const requestedPage = window.location.pathname.slice(1);
+const currentPage = Object.hasOwn(pageTitles, requestedPage) ? requestedPage : "dashboard";
+const currentPath = currentPage === "dashboard" && window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
+document.body.dataset.page = currentPage;
+document.title = `CareConnect | ${pageTitles[currentPage]}`;
+document.querySelectorAll("main > section[data-page]").forEach(section => {
+  section.classList.toggle("page-active", section.dataset.page === currentPage);
+});
+document.querySelectorAll("nav a").forEach(link => {
+  if (new URL(link.href).pathname === currentPath) link.setAttribute("aria-current", "page");
+});
+const navigateToPage = page => window.location.assign(`/${page}`);
 const safeHttpsUrl = value => {
   try {
     const url = new URL(value);
@@ -29,10 +50,33 @@ const assetPath = (item, type) => {
   const directory = type === "doctor" ? "doc" : type === "product" ? "dishes" : "dep";
   return `/admin/Res_img/${directory}/${encodeURIComponent(file)}`;
 };
-const api = async (endpoint, options = {}) => {
+let csrfToken = null;
+const loadCsrfToken = async () => {
+  const response = await fetch("/api/csrf", { credentials: "same-origin" });
+  csrfToken = (await response.json()).csrfToken;
+};
+// <input type="datetime-local"> has no timezone; send an unambiguous UTC instant instead.
+const toIsoDate = value => {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+};
+const api = async (endpoint, options = {}, retried = false) => {
   const headers = { ...(options.headers || {}) };
+  const unsafe = !["GET", "HEAD"].includes(String(options.method || "GET").toUpperCase());
   if (options.body && !(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
+  if (unsafe) {
+    if (!csrfToken) await loadCsrfToken();
+    headers["X-CSRF-Token"] = csrfToken;
+  }
   const response = await fetch(`/api/${endpoint}`, { ...options, headers, credentials: "same-origin" });
+  if (response.status === 403 && unsafe && !retried) {
+    const failure = await response.clone().json().catch(() => ({}));
+    if (failure.code === "CSRF") {
+      csrfToken = null; // expired session token: fetch a fresh one and retry once
+      return api(endpoint, options, true);
+    }
+  }
+  if (unsafe && ["login", "register", "logout"].includes(endpoint)) csrfToken = null; // session was replaced
   if (response.status === 204) return null;
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Something went wrong.");
@@ -289,7 +333,7 @@ function openAuth(mode = "signin", message = "") {
       const result = await api(isRegister ? "register" : "login", { method: "POST", body: JSON.stringify(body) });
       await saveUser(result.user);
       $("#auth-dialog").close();
-      location.hash = "dashboard";
+      navigateToPage("dashboard");
       showToast(isRegister ? "Welcome to CareConnect." : "Welcome back.");
     } catch (error) {
       showToast(error.message);
@@ -665,6 +709,7 @@ $("#cancel-clinic-edit").addEventListener("click", clearManagedClinics);
 $("#booking-form").addEventListener("submit", async event => {
   event.preventDefault();
   const body = Object.fromEntries(new FormData(event.target));
+  if (body.date) body.date = toIsoDate(body.date);
   if (state.selectedDoctor) {
     body.doctorId = state.selectedDoctor.id;
   } else if (state.selectedAppointmentProvider) {
@@ -682,7 +727,7 @@ $("#booking-form").addEventListener("submit", async event => {
     $("#booking-dialog").close();
     event.target.reset();
     await loadAppointments();
-    location.hash = "appointments";
+    navigateToPage("appointments");
     state.selectedAppointmentProvider = null;
     showToast(externalRequest
       ? "Requested time saved in your list. Contact the provider directly to confirm."
@@ -716,6 +761,7 @@ $("#no-show-form").addEventListener("submit", async event => {
   $("#no-show-result").textContent = "";
   try {
     const body = Object.fromEntries(new FormData(form));
+    if (body.date) body.date = toIsoDate(body.date);
     showNoShowEstimate(await api("ml/no-show", { method: "POST", body: JSON.stringify(body) }));
   } catch (error) {
     showToast(error.message);
@@ -871,7 +917,6 @@ function clearLocation() {
     saveCart();
     const session = await api("me");
     await saveUser(session.user);
-    if (state.user && !location.hash) location.hash = "dashboard";
   } catch (error) {
     showToast(error.message);
   }

@@ -12,6 +12,30 @@ jobs:
         with:
           node-version: 22
       - run: npm ci && npm test
+  node-postgres:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Healthcare-Consultation-website-master
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: careconnect
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: careconnect
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U careconnect" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://careconnect:ci-password@localhost:5432/careconnect
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run test:pg
   ml:
     runs-on: ubuntu-latest
     defaults:

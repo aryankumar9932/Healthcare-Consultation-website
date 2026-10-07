@@ -15,8 +15,18 @@ process.env.ML_SERVICE_KEY = "test-only-ml-service-key";
 const originalFetch = global.fetch;
 let nearbyQuery = "";
 let mlNoShowInput;
-global.fetch = async (input, options) => {
+global.fetch = async (input, options = {}) => {
   const hostname = new URL(input).hostname;
+  // Browsers get a CSRF token from /api/csrf; do the same for unsafe requests to the app under test.
+  if (hostname === "127.0.0.1" && ![ "GET", "HEAD", "OPTIONS" ].includes((options.method || "GET").toUpperCase())) {
+    const headers = new Headers(options.headers || {});
+    const tokenResponse = await originalFetch(new URL("/api/csrf", input), { headers: { Cookie: headers.get("cookie") || "" } });
+    const { csrfToken } = await tokenResponse.json();
+    const fresh = tokenResponse.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
+    if (!headers.get("cookie") && fresh) headers.set("cookie", fresh);
+    headers.set("x-csrf-token", csrfToken);
+    options = { ...options, headers: Object.fromEntries(headers) };
+  }
   if (hostname === "ml-service.test") {
     const url = new URL(input);
     if (options.headers["X-Service-Key"] !== process.env.ML_SERVICE_KEY) {
@@ -70,13 +80,15 @@ global.fetch = async (input, options) => {
   }
   return originalFetch(input, options);
 };
-const { app } = require("../server");
+const { app, store, ready } = require("../server");
 
 let server;
 let baseUrl;
 let sessionCookie;
 
 test.before(async () => {
+  await ready;
+  if (store.driver === "postgres") await store.reset(); // isolate from other runs
   server = app.listen(0, "127.0.0.1");
   await new Promise((resolve, reject) => {
     server.once("listening", resolve);
@@ -88,7 +100,20 @@ test.before(async () => {
 test.after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
   global.fetch = originalFetch;
+  await store.close();
   fs.rmSync(dataDirectory, { recursive: true, force: true });
+});
+
+test("serves each navigation page at its own URL", async () => {
+  const pages = ["dashboard", "doctors", "nearby", "ai-tools", "ml-service", "pharmacy", "appointments"];
+  for (const page of pages) {
+    const response = await fetch(`${baseUrl}/${page}`);
+    assert.equal(response.status, 200, `/${page} should be available`);
+    assert.match(response.headers.get("content-type"), /text\/html/);
+    const html = await response.text();
+    assert.match(html, new RegExp(`href="/${page}"`));
+    assert.match(html, new RegExp(`data-page="${page}"`));
+  }
 });
 
 test("registers a user and protects private appointment and ML routes", async () => {

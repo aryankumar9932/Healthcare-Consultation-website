@@ -1,7 +1,6 @@
 const express = require("express");
 const session = require("express-session");
 const multer = require("multer");
-const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const pdfParse = require("pdf-parse");
@@ -9,6 +8,8 @@ const mammoth = require("mammoth");
 const { analyzeDocument, chatWithHealthAssistant, predictNoShow, readPrescription, recommendSpecialty } = require("./ml");
 const { normalizeOpenStreetMapElement } = require("./public/geo");
 const mlService = require("./ml-client");
+const { createStore } = require("./db");
+const { applySecurityHeaders, csrfToken, csrfProtection, defaultLimits, limiter } = require("./security");
 
 const root = __dirname;
 const publicDir = path.join(root, "public");
@@ -21,62 +22,9 @@ if (process.env.NODE_ENV === "production" && !process.env.SESSION_SECRET) {
   throw new Error("SESSION_SECRET must be set in production.");
 }
 
-const seed = {
-  departments: [
-    { id: 1, title: "Cardiology", description: "Expert care for heart and blood-vessel conditions.", image: "images/5fc6c72f4cd54.jpg" },
-    { id: 2, title: "Gynecology", description: "Compassionate care for women's health at every stage.", image: "images/5fc6c31dcc11c.jpg" },
-    { id: 3, title: "Neurology", description: "Diagnosis and treatment for the nervous system.", image: "images/5fc6c6e3193a5.png" },
-    { id: 4, title: "Medicine", description: "Everyday primary care, prevention, and treatment.", image: "images/5fc6c797d059d.jpg" },
-    { id: 5, title: "Dentistry", description: "Modern preventive and restorative dental care.", image: "images/5fc6c7e01b6be.jpg" },
-    { id: 6, title: "Orthopedics", description: "Specialist care for bones, joints, and movement.", image: "images/5fe127a361f55.jpg" }
-  ],
-  doctors: [
-    { id: 1, departmentId: 2, name: "Dr. Halima", specialty: "Gynecologist", bio: "Experienced women's health specialist.", fee: 650, image: "images/5ff394a115cbe.jpg", schedule: ["Monday 10:00 - 17:00", "Wednesday 10:00 - 17:00"] },
-    { id: 2, departmentId: 1, name: "Dr. Johny", specialty: "Cardiologist", bio: "Focused on preventive and interventional heart care.", fee: 400, image: "images/5ff4aebc6fe31.jpg", schedule: ["Sunday 10:00 - 17:00", "Wednesday 11:00 - 18:00"] },
-    { id: 3, departmentId: 2, name: "Dr. Sansa", specialty: "Gynecologist", bio: "Patient-first care for every family.", fee: 650, image: "images/5ff4aed5e8e21.jpg", schedule: ["Monday 10:00 - 17:00", "Wednesday 11:00 - 18:00"] },
-    { id: 4, departmentId: 3, name: "Dr. John", specialty: "Neurologist", bio: "Helping patients understand and manage neurological health.", fee: 450, image: "images/5ff4aef3c8c25.jpg", schedule: ["Sunday 10:00 - 14:30", "Wednesday 11:00 - 18:00"] },
-    { id: 5, departmentId: 4, name: "Dr. Lue", specialty: "Physician", bio: "Comprehensive primary and preventive care.", fee: 400, image: "images/5ff4af1bed6be.jpg", schedule: ["Sunday 10:00 - 17:00", "Monday 11:00 - 18:00"] },
-    { id: 6, departmentId: 5, name: "Dr. Kaung", specialty: "Dentist", bio: "Comfortable, modern dental treatment.", fee: 450, image: "images/5ff4b00c9c319.jpg", schedule: ["Monday 10:00 - 17:00", "Wednesday 11:00 - 18:00"] },
-    { id: 7, departmentId: 6, name: "Dr. Tomas", specialty: "Orthopedist", bio: "Restoring movement and quality of life.", fee: 650, image: "images/5ff4b029292e4.jpg", schedule: ["Sunday 10:00 - 14:30", "Tuesday 11:00 - 18:00"] }
-  ],
-  products: [
-    { id: 1, name: "Sugatrol 100mg 10pcs", description: "Acarbose 100mg - Pacific Pharmaceuticals Ltd.", price: 240, image: "images/5fc6e8091e91d.jpg" },
-    { id: 2, name: "Napa 500mg", description: "For temporary relief of headache and minor pain.", price: 50, image: "images/600e89f8523d9.jpg" }
-  ],
-  users: [],
-  appointments: [],
-  orders: [],
-  clinics: []
-};
-
-function ensureDb() {
-  fs.mkdirSync(path.dirname(dbFile), { recursive: true });
-  if (!fs.existsSync(dbFile)) {
-    fs.writeFileSync(dbFile, JSON.stringify(seed, null, 2));
-    return;
-  }
-  const current = JSON.parse(fs.readFileSync(dbFile, "utf8"));
-  let changed = false;
-  const catalogues = new Set(["departments", "doctors", "products"]);
-  for (const key of Object.keys(seed)) {
-    if (!Array.isArray(current[key]) || (catalogues.has(key) && !current[key].length)) {
-      current[key] = seed[key];
-      changed = true;
-    }
-  }
-  if (changed) fs.writeFileSync(dbFile, JSON.stringify(current, null, 2));
-}
-
-function readDb() {
-  ensureDb();
-  return JSON.parse(fs.readFileSync(dbFile, "utf8"));
-}
-
-function writeDb(db) {
-  const temporaryFile = `${dbFile}.${process.pid}.tmp`;
-  fs.writeFileSync(temporaryFile, JSON.stringify(db, null, 2));
-  fs.renameSync(temporaryFile, dbFile);
-}
+const store = createStore({ dbFile });
+const ready = store.init();
+ready.catch(() => {}); // surfaced by the readiness middleware / start-up handler
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
   return `${salt}:${crypto.scryptSync(password, salt, 64).toString("hex")}`;
@@ -88,6 +36,9 @@ function verifyPassword(password, stored) {
   const actual = crypto.scryptSync(password, salt, 64);
   return crypto.timingSafeEqual(actual, Buffer.from(hash, "hex"));
 }
+
+// Used to spend the same time on unknown accounts as on real ones (prevents user enumeration by timing).
+const DUMMY_HASH = hashPassword("not-a-real-password");
 
 function publicUser(user) {
   const { password, ...safe } = user;
@@ -105,17 +56,16 @@ function validBootstrapToken(value) {
   return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
 }
 
-function idFor(list) {
-  return list.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1;
-}
+// Wrap async route handlers so rejected promises reach the error middleware.
+const wrap = handler => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
-function requireUser(req, res, next) {
+const requireUser = wrap(async (req, res, next) => {
   const userId = Number(req.session && req.session.userId);
-  const user = readDb().users.find(item => item.id === userId);
+  const user = Number.isSafeInteger(userId) ? await store.getUserById(userId) : null;
   if (!user) return res.status(401).json({ error: "Please sign in to continue." });
   req.user = user;
   next();
-}
+});
 
 function validDate(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value)) && Date.parse(value) > Date.now();
@@ -140,9 +90,18 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Replace the session id after a privilege change (prevents session fixation).
+const startSession = (req, userId) => new Promise((resolve, reject) => {
+  req.session.regenerate(error => {
+    if (error) return reject(error);
+    req.session.userId = userId;
+    resolve();
+  });
+});
+
 let lastGeocodeAt = 0;
-async function geocodeClinicAddress(address, clinics) {
-  const existing = clinics.find(clinic => clinic.address.trim().toLowerCase() === address.toLowerCase());
+async function geocodeClinicAddress(address, excludeId) {
+  const existing = await store.findClinicByAddress(address, excludeId);
   if (existing) return { latitude: existing.latitude, longitude: existing.longitude };
 
   const delay = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
@@ -183,23 +142,26 @@ async function geocodeClinicAddress(address, clinics) {
   return { latitude, longitude };
 }
 
-function publicClinic(clinic, doctors) {
-  const doctor = doctors.find(item => item.id === clinic.doctorId);
-  return doctor ? { ...clinic, doctor: publicUser(doctor) } : null;
+function publicClinic(clinic) {
+  return { ...clinic, doctor: publicUser(clinic.doctor) };
 }
 
-function createApp() {
+function createApp(options = {}) {
+  const limits = { ...defaultLimits(), ...(options.limits || {}) };
   const app = express();
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1 } });
   app.disable("x-powered-by");
+  applySecurityHeaders(app);
   app.use(express.json({ limit: "32kb" }));
   app.use("/api", (req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     next();
   });
+  app.use("/api", (req, res, next) => ready.then(() => next(), next)); // wait for DB migrations on first requests
   app.use(session({
     name: "careconnect.sid",
     secret: sessionSecret,
+    store: store.sessionStore(session),
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -210,24 +172,34 @@ function createApp() {
     }
   }));
 
-  app.get("/api/health", (req, res) => res.json({ ok: true, mlRuntime: "gemini" }));
-  app.get("/api/me", (req, res) => {
+  const apiLimiter = limiter(limits.api, "Too many requests. Please slow down and try again later.");
+  const authLimiter = limiter(limits.auth, "Too many sign-in attempts from this network. Try again later.");
+  const aiLimiter = limiter(limits.ai, "AI request limit reached. Please try again later.");
+  app.use("/api", apiLimiter);
+  app.use("/api/login", authLimiter);
+  app.use("/api/register", authLimiter);
+  app.use("/api/ml", aiLimiter);
+  app.use("/api", csrfProtection);
+
+  app.get("/api/csrf", (req, res) => res.json({ csrfToken: csrfToken(req) }));
+  app.get("/api/health", wrap(async (req, res) => {
+    await ready;
+    res.json({ ok: true, mlRuntime: "gemini", database: store.driver });
+  }));
+  app.get("/api/me", wrap(async (req, res) => {
     const userId = Number(req.session && req.session.userId);
-    const user = readDb().users.find(item => item.id === userId);
+    const user = Number.isSafeInteger(userId) ? await store.getUserById(userId) : null;
     res.json({ user: user ? sessionUser(user) : null });
-  });
-  app.get("/api/departments", (req, res) => res.json(readDb().departments));
-  app.get("/api/doctors", (req, res) => {
-    const db = readDb();
+  }));
+  app.get("/api/departments", wrap(async (req, res) => res.json(await store.listDepartments())));
+  app.get("/api/doctors", wrap(async (req, res) => {
     const departmentId = Number(req.query.departmentId);
-    res.json(departmentId ? db.doctors.filter(doctor => doctor.departmentId === departmentId) : db.doctors);
-  });
-  app.get("/api/products", (req, res) => res.json(readDb().products));
-  app.get("/api/clinics", (req, res) => {
-    const db = readDb();
-    res.json(db.clinics.filter(clinic => clinic.verified)
-      .map(clinic => publicClinic(clinic, db.doctors)).filter(Boolean));
-  });
+    res.json(await store.listDoctors(departmentId || undefined));
+  }));
+  app.get("/api/products", wrap(async (req, res) => res.json(await store.listProducts())));
+  app.get("/api/clinics", wrap(async (req, res) => {
+    res.json((await store.listClinics({ verifiedOnly: true })).map(publicClinic));
+  }));
   app.post("/api/nearby", requireUser, async (req, res, next) => {
     const latitude = Number((req.body || {}).latitude);
     const longitude = Number((req.body || {}).longitude);
@@ -267,43 +239,42 @@ function createApp() {
     }
   });
 
-  app.post("/api/register", (req, res) => {
+  app.post("/api/register", wrap(async (req, res) => {
     const body = req.body || {};
-    const db = readDb();
     const name = String(body.name || "").trim();
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
     if (!name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8 || password.length > 128) {
       return res.status(400).json({ error: "Enter a valid name and email, and a password of at least 8 characters." });
     }
-    if (db.users.some(user => user.email.toLowerCase() === email)) {
-      return res.status(409).json({ error: "An account with that email already exists." });
-    }
-    const user = {
-      id: idFor(db.users),
-      name,
-      email,
-      phone: String(body.phone || "").trim().slice(0, 40),
-      password: hashPassword(password),
-      createdAt: new Date().toISOString()
-    };
-    db.users.push(user);
-    writeDb(db);
-    req.session.userId = user.id;
+    const user = await store.createUser({
+      name, email, phone: String(body.phone || "").trim().slice(0, 40), password: hashPassword(password)
+    });
+    if (!user) return res.status(409).json({ error: "An account with that email already exists." });
+    await startSession(req, user.id);
     res.status(201).json({ user: sessionUser(user) });
-  });
+  }));
 
-  app.post("/api/login", (req, res) => {
+  app.post("/api/login", wrap(async (req, res) => {
     const body = req.body || {};
-    const db = readDb();
-    const email = String(body.email || "").trim().toLowerCase();
-    const user = db.users.find(item => item.email.toLowerCase() === email);
-    if (!user || !verifyPassword(String(body.password || ""), user.password)) {
+    const email = String(body.email || "").trim().toLowerCase().slice(0, 254);
+    const password = String(body.password || "").slice(0, 128);
+    const lock = await store.getLoginLock(email);
+    if (lock.locked) {
+      const minutes = Math.max(1, Math.ceil((new Date(lock.until) - Date.now()) / 60000));
+      res.setHeader("Retry-After", String(minutes * 60));
+      return res.status(429).json({ error: `Too many failed sign-in attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.` });
+    }
+    const user = await store.getUserByEmail(email);
+    const valid = verifyPassword(password, user ? user.password : DUMMY_HASH) && Boolean(user);
+    if (!valid) {
+      await store.recordLoginFailure(email, limits.lockout);
       return res.status(401).json({ error: "Invalid email or password." });
     }
-    req.session.userId = user.id;
+    await store.clearLoginFailures(email);
+    await startSession(req, user.id);
     res.json({ user: sessionUser(user) });
-  });
+  }));
 
   app.post("/api/logout", (req, res, next) => {
     req.session.destroy(error => {
@@ -317,107 +288,79 @@ function createApp() {
     });
   });
 
-  app.post("/api/admin/bootstrap", requireUser, (req, res) => {
+  app.post("/api/admin/bootstrap", requireUser, wrap(async (req, res) => {
     if (isAdmin(req.user)) return res.status(409).json({ error: "This account is already an administrator." });
     if (!canBootstrapAdmin(req.user) || !validBootstrapToken((req.body || {}).setupToken)) {
       return res.status(403).json({ error: "Administrator setup is unavailable or the setup token is invalid." });
     }
-    const db = readDb();
-    const user = db.users.find(item => item.id === req.user.id);
-    user.role = "admin";
-    writeDb(db);
+    const user = await store.setUserRole(req.user.id, "admin");
     res.json({ user: sessionUser(user) });
-  });
+  }));
 
-  app.get("/api/admin/clinics", requireUser, requireAdmin, (req, res) => {
-    const db = readDb();
-    res.json(db.clinics.map(clinic => publicClinic(clinic, db.doctors)).filter(Boolean));
-  });
+  app.get("/api/admin/clinics", requireUser, requireAdmin, wrap(async (req, res) => {
+    res.json((await store.listClinics()).map(publicClinic));
+  }));
 
-  app.post("/api/admin/clinics", requireUser, requireAdmin, async (req, res, next) => {
-    try {
-      const body = req.body || {};
-      const db = readDb();
-      const doctor = db.doctors.find(item => item.id === Number(body.doctorId));
-      const name = String(body.name || "").trim();
-      const address = String(body.address || "").trim();
-      if (!doctor || name.length < 2 || name.length > 120 || address.length < 8 || address.length > 300) {
-        return res.status(400).json({ error: "Choose a doctor and enter the clinic name and full address." });
-      }
-      const coordinates = await geocodeClinicAddress(address, db.clinics);
-      const clinic = {
-        id: idFor(db.clinics),
-        doctorId: doctor.id,
-        name,
-        address,
-        ...coordinates,
-        verified: false,
-        createdAt: new Date().toISOString()
-      };
-      db.clinics.push(clinic);
-      writeDb(db);
-      res.status(201).json(publicClinic(clinic, db.doctors));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.put("/api/admin/clinics/:id", requireUser, requireAdmin, async (req, res, next) => {
-    try {
-      const body = req.body || {};
-      const db = readDb();
-      const clinic = db.clinics.find(item => item.id === Number(req.params.id));
-      const doctor = db.doctors.find(item => item.id === Number(body.doctorId));
-      const name = String(body.name || "").trim();
-      const address = String(body.address || "").trim();
-      if (!clinic) return res.status(404).json({ error: "Clinic not found." });
-      if (!doctor || name.length < 2 || name.length > 120 || address.length < 8 || address.length > 300) {
-        return res.status(400).json({ error: "Choose a doctor and enter the clinic name and full address." });
-      }
-      const addressChanged = address.toLowerCase() !== clinic.address.toLowerCase();
-      const coordinates = !addressChanged
-        ? { latitude: clinic.latitude, longitude: clinic.longitude }
-        : await geocodeClinicAddress(address, db.clinics.filter(item => item.id !== clinic.id));
-      Object.assign(clinic, { doctorId: doctor.id, name, address, ...coordinates, verified: addressChanged ? false : clinic.verified });
-      writeDb(db);
-      res.json(publicClinic(clinic, db.doctors));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.post("/api/admin/clinics/:id/verify", requireUser, requireAdmin, (req, res) => {
-    const db = readDb();
-    const clinic = db.clinics.find(item => item.id === Number(req.params.id));
-    if (!clinic) return res.status(404).json({ error: "Clinic not found." });
-    clinic.verified = true;
-    clinic.verifiedAt = new Date().toISOString();
-    writeDb(db);
-    res.json(publicClinic(clinic, db.doctors));
-  });
-
-  app.delete("/api/admin/clinics/:id", requireUser, requireAdmin, (req, res) => {
-    const db = readDb();
-    const index = db.clinics.findIndex(item => item.id === Number(req.params.id));
-    if (index === -1) return res.status(404).json({ error: "Clinic not found." });
-    db.clinics.splice(index, 1);
-    writeDb(db);
-    res.status(204).end();
-  });
-
-  app.get("/api/appointments", requireUser, (req, res) => {
-    const db = readDb();
-    res.json(db.appointments
-      .filter(item => item.userId === req.user.id)
-      .map(item => ({ ...item, doctor: db.doctors.find(doctor => doctor.id === item.doctorId) })));
-  });
-
-  app.post("/api/appointments", requireUser, (req, res) => {
+  app.post("/api/admin/clinics", requireUser, requireAdmin, wrap(async (req, res) => {
     const body = req.body || {};
-    const db = readDb();
+    const doctorId = Number(body.doctorId);
+    const doctor = Number.isSafeInteger(doctorId) && doctorId > 0 ? await store.getDoctor(doctorId) : null;
+    const name = String(body.name || "").trim();
+    const address = String(body.address || "").trim();
+    if (!doctor || name.length < 2 || name.length > 120 || address.length < 8 || address.length > 300) {
+      return res.status(400).json({ error: "Choose a doctor and enter the clinic name and full address." });
+    }
+    const coordinates = await geocodeClinicAddress(address);
+    const clinic = await store.createClinic({ doctorId: doctor.id, name, address, ...coordinates });
+    res.status(201).json(publicClinic(clinic));
+  }));
+
+  app.put("/api/admin/clinics/:id", requireUser, requireAdmin, wrap(async (req, res) => {
+    const body = req.body || {};
+    const clinicId = Number(req.params.id);
+    const clinic = Number.isSafeInteger(clinicId) ? await store.getClinic(clinicId) : null;
+    const doctorId = Number(body.doctorId);
+    const doctor = Number.isSafeInteger(doctorId) && doctorId > 0 ? await store.getDoctor(doctorId) : null;
+    const name = String(body.name || "").trim();
+    const address = String(body.address || "").trim();
+    if (!clinic) return res.status(404).json({ error: "Clinic not found." });
+    if (!doctor || name.length < 2 || name.length > 120 || address.length < 8 || address.length > 300) {
+      return res.status(400).json({ error: "Choose a doctor and enter the clinic name and full address." });
+    }
+    const addressChanged = address.toLowerCase() !== clinic.address.toLowerCase();
+    const coordinates = !addressChanged
+      ? { latitude: clinic.latitude, longitude: clinic.longitude }
+      : await geocodeClinicAddress(address, clinic.id);
+    const updated = await store.updateClinic(clinic.id, {
+      doctorId: doctor.id, name, address, ...coordinates, verified: addressChanged ? false : clinic.verified
+    });
+    res.json(publicClinic(updated));
+  }));
+
+  app.post("/api/admin/clinics/:id/verify", requireUser, requireAdmin, wrap(async (req, res) => {
+    const clinicId = Number(req.params.id);
+    const clinic = Number.isSafeInteger(clinicId) ? await store.verifyClinic(clinicId) : null;
+    if (!clinic) return res.status(404).json({ error: "Clinic not found." });
+    res.json(publicClinic(clinic));
+  }));
+
+  app.delete("/api/admin/clinics/:id", requireUser, requireAdmin, wrap(async (req, res) => {
+    const clinicId = Number(req.params.id);
+    if (!Number.isSafeInteger(clinicId) || !(await store.deleteClinic(clinicId))) {
+      return res.status(404).json({ error: "Clinic not found." });
+    }
+    res.status(204).end();
+  }));
+
+  app.get("/api/appointments", requireUser, wrap(async (req, res) => {
+    res.json(await store.listAppointmentsForUser(req.user.id));
+  }));
+
+  app.post("/api/appointments", requireUser, wrap(async (req, res) => {
+    const body = req.body || {};
     const requestedDoctorId = Number(body.doctorId);
     const doctor = Number.isSafeInteger(requestedDoctorId) && requestedDoctorId > 0
-      ? db.doctors.find(item => item.id === requestedDoctorId)
+      ? await store.getDoctor(requestedDoctorId)
       : null;
     const date = String(body.date || "");
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
@@ -430,55 +373,44 @@ function createApp() {
     if ((!doctor && !externalProvider) || !validDate(date)) {
       return res.status(400).json({ error: "Choose a listed doctor or nearby healthcare provider and a future appointment date." });
     }
-    const appointment = {
-      id: idFor(db.appointments),
+    const appointment = await store.createAppointment({
       userId: req.user.id,
       doctorId: doctor ? doctor.id : null,
-      ...(doctor ? {} : {
-        providerName,
-        providerAddress,
-        providerSource: "openstreetmap"
-      }),
+      providerName, providerAddress, providerSource: "openstreetmap",
       date,
       notes: String(body.notes || "").trim().slice(0, 1000),
-      status: doctor ? "Pending" : "Request saved · unconfirmed",
-      createdAt: new Date().toISOString()
-    };
-    db.appointments.push(appointment);
-    writeDb(db);
+      status: doctor ? "Pending" : "Request saved · unconfirmed"
+    });
     res.status(201).json(appointment);
-  });
+  }));
 
-  app.get("/api/orders", requireUser, (req, res) => {
-    res.json(readDb().orders.filter(item => item.userId === req.user.id));
-  });
+  app.get("/api/orders", requireUser, wrap(async (req, res) => {
+    res.json(await store.listOrdersForUser(req.user.id));
+  }));
 
-  app.post("/api/orders", requireUser, (req, res) => {
+  app.post("/api/orders", requireUser, wrap(async (req, res) => {
     const body = req.body || {};
-    const db = readDb();
     if (!Array.isArray(body.items) || !body.items.length || body.items.length > 30) {
       return res.status(400).json({ error: "Your cart is empty or contains too many items." });
     }
+    const ids = [...new Set(body.items.map(item => Number(item && item.productId)).filter(Number.isSafeInteger))];
+    const products = await store.getProductsByIds(ids);
     const items = body.items.map(item => {
-      const product = db.products.find(entry => entry.id === Number(item.productId));
-      const quantity = Number(item.quantity);
+      const product = products.find(entry => entry.id === Number(item && item.productId));
+      const quantity = Number(item && item.quantity);
       return product && Number.isInteger(quantity) && quantity > 0 && quantity <= 50
         ? { productId: product.id, name: product.name, quantity, price: product.price }
         : null;
     });
     if (items.some(item => !item) || !items.length) return res.status(400).json({ error: "The cart contains an invalid product or quantity." });
-    const order = {
-      id: idFor(db.orders),
+    const order = await store.createOrder({
       userId: req.user.id,
       items,
       total: items.reduce((sum, item) => sum + item.price * item.quantity, 0),
-      status: "Processing",
-      createdAt: new Date().toISOString()
-    };
-    db.orders.push(order);
-    writeDb(db);
+      status: "Processing"
+    });
     res.status(201).json(order);
-  });
+  }));
 
   app.post("/api/ml/recommendations", requireUser, async (req, res, next) => {
     try {
@@ -486,7 +418,7 @@ function createApp() {
       if (symptoms.length < 5 || symptoms.length > 1500) {
         return res.status(400).json({ error: "Describe your concern in 5 to 1,500 characters." });
       }
-      const specialties = readDb().doctors.map(doctor => doctor.specialty);
+      const specialties = (await store.listDoctors()).map(doctor => doctor.specialty);
       const local = await mlService.specialty(symptoms, specialties);
       const matchedSpecialty = local && specialties.find(
         item => item.toLowerCase() === String(local.specialty || "").toLowerCase()
@@ -520,20 +452,20 @@ function createApp() {
   app.post("/api/ml/no-show", requireUser, async (req, res, next) => {
     try {
       const body = req.body || {};
-      const db = readDb();
-      const doctor = db.doctors.find(item => item.id === Number(body.doctorId));
+      const requestedId = Number(body.doctorId);
+      const doctor = Number.isSafeInteger(requestedId) && requestedId > 0 ? await store.getDoctor(requestedId) : null;
       const date = String(body.date || "");
       if (!doctor || !validDate(date)) {
         return res.status(400).json({ error: "Choose a doctor and a future appointment date." });
       }
-      const history = db.appointments.filter(item => item.userId === req.user.id);
+      const history = await store.appointmentStats(req.user.id);
       const when = new Date(date);
       const local = await mlService.noShow({
         lead_days: Math.max(0, Math.round((when - Date.now()) / 864e5)),
         hour: when.getHours(),
         dow: when.getDay(),
-        prev_appts: history.length,
-        prev_noshow: history.filter(item => item.status === "No-show").length,
+        prev_appts: history.total,
+        prev_noshow: history.noShows,
         age: 40,
         reminder: 1,
         fee: doctor.fee
@@ -555,8 +487,8 @@ function createApp() {
       const result = await predictNoShow({
         doctor: doctor.specialty,
         appointmentDate: date,
-        previousAppointments: history.length,
-        previousNoShows: history.filter(item => item.status === "No-show").length
+        previousAppointments: history.total,
+        previousNoShows: history.noShows
       });
       res.json(result);
     } catch (error) {
@@ -668,7 +600,7 @@ function createApp() {
         return res.status(400).json({ error: "No readable text was found in that file." });
       }
       if (mode === "prescription") {
-        const products = readDb().products;
+        const products = await store.listProducts();
         return res.json(await readPrescription({ text: extractedText, image, products }));
       }
       res.json(await analyzeDocument({ text: extractedText, image }));
@@ -682,6 +614,9 @@ function createApp() {
 
   app.use("/admin/Res_img", express.static(path.join(root, "admin", "Res_img"), { fallthrough: false, index: false }));
   app.use(express.static(publicDir, { index: "index.html" }));
+  app.get(["/dashboard", "/doctors", "/nearby", "/ai-tools", "/ml-service", "/pharmacy", "/appointments"], (req, res) => {
+    res.sendFile(path.join(publicDir, "index.html"));
+  });
   app.use((req, res) => res.status(404).json({ error: "Not found." }));
 
   app.use((error, req, res, next) => {
@@ -702,10 +637,14 @@ function createApp() {
   return app;
 }
 
-ensureDb();
 const app = createApp();
 if (require.main === module) {
-  app.listen(port, () => console.log(`Healthcare Consultation running at http://localhost:${port}`));
+  ready.then(() => {
+    app.listen(port, () => console.log(`Healthcare Consultation running at http://localhost:${port} (database: ${store.driver})`));
+  }).catch(error => {
+    console.error("Failed to initialise the database:", error.message);
+    process.exit(1);
+  });
 }
 
-module.exports = { app, hashPassword, verifyPassword };
+module.exports = { app, createApp, store, ready, hashPassword, verifyPassword };

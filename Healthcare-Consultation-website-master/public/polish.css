@@ -42,6 +42,11 @@ nav a {
   transition: color 160ms ease;
 }
 
+nav a[aria-current="page"]:not(.nav-ml-link) {
+  color: var(--teal);
+  font-weight: 750;
+}
+
 nav .nav-ml-link {
   padding: 9px 13px;
   color: #fff;
@@ -221,6 +226,10 @@ nav .nav-ml-link:focus-visible {
   margin: 0 0 8px;
   color: var(--ink);
   font-size: 16px;
+}
+
+main > section[data-page]:not(.page-active) {
+  display: none;
 }
 
 .pharmacy-section {

@@ -1,20 +1,37 @@
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: careconnect
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a database password}
+      POSTGRES_DB: careconnect
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U careconnect -d careconnect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   web:
     build: .
     ports:
       - "3000:3000"
     environment:
+      DATABASE_URL: postgres://careconnect:${POSTGRES_PASSWORD}@db:5432/careconnect
       SESSION_SECRET: ${SESSION_SECRET:?set a long random session secret}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ML_SERVICE_URL: http://ml:8000
       ML_SERVICE_KEY: ${ML_SERVICE_KEY:?set a long random ML service key}
-    volumes:
-      - appdata:/app/data
+      # Set to 1 when running behind one reverse proxy / load balancer (needed for client IPs + Secure cookies).
+      TRUST_PROXY: ${TRUST_PROXY:-}
     depends_on:
-      - ml
+      db:
+        condition: service_healthy
+      ml:
+        condition: service_started
   ml:
     build: ./ml-service
     environment:
       ML_SERVICE_KEY: ${ML_SERVICE_KEY:?set a long random ML service key}
 volumes:
-  appdata:
+  pgdata:
