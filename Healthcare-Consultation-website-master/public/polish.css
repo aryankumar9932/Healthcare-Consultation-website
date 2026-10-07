@@ -228,6 +228,35 @@ nav .nav-ml-link:focus-visible {
   font-size: 16px;
 }
 
+.location-search-form {
+  max-width: 680px;
+  margin-top: 22px;
+}
+
+.location-search-form label {
+  margin-top: 0;
+}
+
+.location-search-form > div {
+  display: flex;
+  gap: 10px;
+}
+
+.location-search-form input {
+  min-width: 0;
+  flex: 1;
+}
+
+.location-clear-button {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 main > section[data-page]:not(.page-active) {
   display: none;
 }
@@ -489,6 +518,11 @@ dialog {
 
   .pharmacy-nearby-list {
     grid-template-columns: 1fr;
+  }
+
+  .location-search-form > div {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .pharmacy-catalog-heading {

@@ -100,10 +100,7 @@ const startSession = (req, userId) => new Promise((resolve, reject) => {
 });
 
 let lastGeocodeAt = 0;
-async function geocodeClinicAddress(address, excludeId) {
-  const existing = await store.findClinicByAddress(address, excludeId);
-  if (existing) return { latitude: existing.latitude, longitude: existing.longitude };
-
+async function searchOpenStreetMapAddress(address) {
   const delay = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
   if (delay) await new Promise(resolve => setTimeout(resolve, delay));
   lastGeocodeAt = Date.now();
@@ -134,11 +131,22 @@ async function geocodeClinicAddress(address, excludeId) {
   const latitude = Number(results[0]?.lat);
   const longitude = Number(results[0]?.lon);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    const error = new Error("The address could not be found. Add the full clinic address and try again.");
+    const error = new Error("That place could not be found. Try a town, city, or full address.");
     error.status = 400;
     error.expose = true;
     throw error;
   }
+  return {
+    latitude,
+    longitude,
+    label: String(results[0].display_name || address).slice(0, 300)
+  };
+}
+
+async function geocodeClinicAddress(address, excludeId) {
+  const existing = await store.findClinicByAddress(address, excludeId);
+  if (existing) return { latitude: existing.latitude, longitude: existing.longitude };
+  const { latitude, longitude } = await searchOpenStreetMapAddress(address);
   return { latitude, longitude };
 }
 
@@ -200,6 +208,13 @@ function createApp(options = {}) {
   app.get("/api/clinics", wrap(async (req, res) => {
     res.json((await store.listClinics({ verifiedOnly: true })).map(publicClinic));
   }));
+  app.post("/api/location/geocode", requireUser, wrap(async (req, res) => {
+    const query = String((req.body || {}).query || "").trim();
+    if (query.length < 3 || query.length > 200) {
+      return res.status(400).json({ error: "Enter a place name or address between 3 and 200 characters." });
+    }
+    res.json(await searchOpenStreetMapAddress(query));
+  }));
   app.post("/api/nearby", requireUser, async (req, res, next) => {
     const latitude = Number((req.body || {}).latitude);
     const longitude = Number((req.body || {}).longitude);
@@ -219,6 +234,7 @@ function createApp(options = {}) {
         body: new URLSearchParams({ data: query }),
         signal: AbortSignal.timeout(25000)
       });
+
       if (!response.ok) {
         const error = new Error(`OpenStreetMap nearby search returned HTTP ${response.status}. Please try again later.`);
         error.status = 503;
@@ -614,7 +630,7 @@ function createApp(options = {}) {
 
   app.use("/admin/Res_img", express.static(path.join(root, "admin", "Res_img"), { fallthrough: false, index: false }));
   app.use(express.static(publicDir, { index: "index.html" }));
-  app.get(["/dashboard", "/doctors", "/nearby", "/ai-tools", "/ml-service", "/pharmacy", "/appointments"], (req, res) => {
+  app.get(["/dashboard", "/doctors", "/hospitals", "/nearby", "/ai-tools", "/ml-service", "/pharmacy", "/appointments"], (req, res) => {
     res.sendFile(path.join(publicDir, "index.html"));
   });
   app.use((req, res) => res.status(404).json({ error: "Not found." }));

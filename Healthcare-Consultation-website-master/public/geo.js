@@ -24,6 +24,16 @@
     return providers;
   }
 
+  function isHospital(provider) {
+    return provider.facilityType === "hospital" || provider.doctor?.specialty === "Hospital";
+  }
+
+  function isDoctor(provider) {
+    return provider.category === "healthcare" &&
+      (["doctor", "doctors", "dentist"].includes(provider.facilityType) ||
+        ["Doctor", "Dentist"].includes(provider.doctor?.specialty));
+  }
+
   function normalizeOpenStreetMapElement(element) {
     if (!element || !["node", "way", "relation"].includes(element.type) ||
         !Number.isSafeInteger(Number(element.id)) || !element.tags || typeof element.tags !== "object") return null;
@@ -36,7 +46,9 @@
     const pharmacy = tags.amenity === "pharmacy" ||
       tags.healthcare === "pharmacy" ||
       tags.shop === "chemist";
-    const name = String(tags.name || tags["name:en"] || tags.operator || (pharmacy ? "Unnamed medical store" : "Unnamed healthcare provider")).slice(0, 160);
+    const hospital = type === "hospital";
+    const name = String(tags.name || tags["name:en"] || tags.operator ||
+      (pharmacy ? "Unnamed medical store" : hospital ? "Unnamed hospital" : "Unnamed healthcare provider")).slice(0, 160);
     const address = tags["addr:full"] || [
       [tags["addr:housenumber"], tags["addr:street"]].filter(Boolean).join(" "),
       tags["addr:suburb"] || tags["addr:neighbourhood"],
@@ -59,6 +71,7 @@
       longitude,
       doctor: { id: null, name, specialty },
       category: pharmacy ? "pharmacy" : "healthcare",
+      facilityType: pharmacy ? "pharmacy" : type,
       source: "openstreetmap",
       mapURI: `https://www.openstreetmap.org/${element.type}/${Number(element.id)}`,
       phone: String(tags.phone || tags["contact:phone"] || ""),
@@ -66,7 +79,7 @@
     };
   }
 
-  const tools = { distanceKm, findNearby, filterByCategory, normalizeOpenStreetMapElement };
+  const tools = { distanceKm, findNearby, filterByCategory, isHospital, isDoctor, normalizeOpenStreetMapElement };
   if (typeof module !== "undefined" && module.exports) module.exports = tools;
   root.CareConnectGeo = tools;
 })(globalThis);

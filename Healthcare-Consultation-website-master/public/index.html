@@ -13,20 +13,30 @@
   <header class="topbar">
     <a class="brand" href="/dashboard"><span class="brand-mark">+</span><span>Care<span>Connect</span></span></a>
     <nav>
-      <a href="/dashboard">Dashboard</a><a href="/doctors">Doctors</a><a href="/nearby">Nearby care</a><a href="/ai-tools">AI tools</a><a class="button button-primary nav-ml-link" href="/ml-service">ML service</a><a href="/pharmacy">Pharmacy</a><a href="/appointments">My appointments</a>
+      <a href="/dashboard">Dashboard</a><a href="/doctors">Doctors</a><a href="/hospitals">Hospitals</a><a href="/nearby">Nearby care</a><a href="/ai-tools">AI tools</a><a class="button button-primary nav-ml-link" href="/ml-service">ML service</a><a href="/pharmacy">Pharmacy</a><a href="/appointments">My appointments</a>
     </nav>
     <div class="header-actions"><span id="user-label"></span><button id="auth-button" class="button button-outline">Sign in</button><button id="cart-button" class="cart">Cart <b id="cart-count">0</b></button></div>
   </header>
   <main>
     <section id="dashboard" class="hero" data-page="dashboard"><div class="hero-copy"><p class="eyebrow">YOUR HEALTH, OUR PRIORITY</p><h1>Healthcare that puts <em>you</em> first.</h1><p class="hero-text">Find trusted doctors, book appointments, and order your essential medicines in one simple place.</p><div class="hero-actions"><a class="button button-primary" href="/doctors">Find a doctor <span>→</span></a><a class="text-link" href="/pharmacy">Visit pharmacy <span>→</span></a></div><div class="trust-row"><span>✓ Verified specialists</span><span>✓ Secure & private</span><span>✓ Easy booking</span></div></div><div class="hero-art"><div class="art-card card-main"><div class="avatar">DR</div><strong>Compassionate care.<br>Whenever you need it.</strong><span>4.9 ★ from our patients</span></div><div class="art-card card-float">Available today <b>12 doctors</b></div><div class="circle circle-one"></div><div class="circle circle-two"></div></section>
     <section class="section" id="departments" data-page="dashboard"><div class="section-heading"><div><p class="eyebrow">SPECIALTIES</p><h2>Care for every chapter of life</h2></div><p>Our specialists are here to help you feel your best.</p></div><div id="department-grid" class="department-grid"></div></section>
-    <section class="section soft" id="doctors" data-page="doctors"><div class="section-heading"><div><p class="eyebrow">LOCAL DOCTORS</p><h2>Real doctors around me</h2></div><p>Find nearby doctors and dentists from OpenStreetMap listings. Results depend on community-mapped data and may not include every provider.</p></div>
-      <div id="doctor-grid" class="doctor-grid" aria-live="polite"></div></section>
+    <section class="section soft" id="doctors" data-page="doctors"><div class="section-heading"><div><p class="eyebrow">LOCAL DOCTORS</p><h2>Doctors and dentists near you</h2></div><p>Named doctors and dental practices listed in OpenStreetMap. Community listings may be incomplete or outdated and may name a practice rather than an individual clinician.</p></div>
+      <div id="doctor-grid" class="doctor-grid" aria-live="polite"></div>
+      <div id="doctors-map" class="clinic-map" role="application" aria-label="Map of nearby doctors and dentists" hidden></div></section>
+    <section class="section soft" id="hospitals" data-page="hospitals"><div class="section-heading"><div><p class="eyebrow">HOSPITAL DIRECTORY</p><h2>Hospitals near you</h2></div><p>Named hospitals mapped by OpenStreetMap contributors. Listings may be incomplete or outdated.</p></div>
+      <div id="hospital-grid" class="nearby-list" aria-live="polite"></div>
+      <div id="hospital-map" class="clinic-map" role="application" aria-label="Map of nearby hospitals" hidden></div></section>
     <section class="section" id="nearby" data-page="nearby">
       <div class="section-heading"><div><p class="eyebrow">CARE AROUND YOU</p><h2>Find nearby care and pharmacies</h2></div><p>Find OpenStreetMap-listed doctors, medical stores, and registered CareConnect clinics near your current location.</p></div>
       <div class="location-consent"><strong>Find real doctors and medical stores near you.</strong>
         <p>Nearby results come from OpenStreetMap contributors and may be incomplete or outdated. If you continue, your exact location is sent to this website's server and OpenStreetMap's public search service for this search only. If you choose a Google Maps fallback link, Google receives the search. Your location is not saved by CareConnect. Map tiles are provided by OpenStreetMap, and directions open its public routing service. You can decline and browse without location.</p>
         <button id="locate-button" class="button button-primary" type="button">Find doctors near me</button>
+        <form id="location-search-form" class="location-search-form">
+          <label for="location-search">If GPS is inaccurate, search your town or address. The place name is sent to OpenStreetMap's public search service.</label>
+          <div><input id="location-search" name="query" type="search" maxlength="200" value="Moradabad, Uttar Pradesh, India" autocomplete="address-level2" required>
+            <button class="button button-outline" type="submit">Use this location</button></div>
+          <button id="clear-location-button" class="location-clear-button" type="button" hidden>Forget saved location</button>
+        </form>
       </div>
       <div id="nearby-controls" class="nearby-controls" hidden><label>Type<select id="nearby-category"><option value="all">Doctors, clinics &amp; medical stores</option><option value="healthcare">Doctors &amp; clinics</option><option value="pharmacy">Medical stores only</option></select></label>
         <label>Specialty<select id="nearby-specialty"><option value="">All specialties</option></select></label>

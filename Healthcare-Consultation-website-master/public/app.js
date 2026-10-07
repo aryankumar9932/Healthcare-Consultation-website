@@ -6,9 +6,21 @@ const savedCart = (() => {
     return [];
   }
 })();
+const savedLocation = (() => {
+  try {
+    const location = JSON.parse(sessionStorage.getItem("careconnect-location") || "null");
+    if (Number.isFinite(location?.latitude) && location.latitude >= -90 && location.latitude <= 90 &&
+        Number.isFinite(location?.longitude) && location.longitude >= -180 && location.longitude <= 180) {
+      return location;
+    }
+  } catch {
+    sessionStorage.removeItem("careconnect-location");
+  }
+  return null;
+})();
 const state = {
   departments: [], doctors: [], products: [], clinics: [], osmProviders: [], nearbyClinics: [],
-  cart: savedCart, user: null, selectedDoctor: null, selectedAppointmentProvider: null, location: null, map: null,
+  cart: savedCart, user: null, selectedDoctor: null, selectedAppointmentProvider: null, location: savedLocation, locationLabel: sessionStorage.getItem("careconnect-location-label") || "", map: null,
   markers: null, locationRequestId: 0, osmSearchError: ""
 };
 const chatHistory = [];
@@ -16,6 +28,7 @@ const $ = selector => document.querySelector(selector);
 const pageTitles = {
   dashboard: "Dashboard",
   doctors: "Doctors",
+  hospitals: "Hospitals",
   nearby: "Nearby care",
   "ai-tools": "AI tools",
   "ml-service": "ML service",
@@ -129,22 +142,50 @@ function renderDoctors() {
     grid.innerHTML = `<div class="doctor-location-prompt"><p class="empty">Share your location to see real doctors and dentists listed near you.</p>
       <button class="button button-primary" type="button" data-find-real-doctors>Find doctors near me</button></div>`;
     grid.querySelector("[data-find-real-doctors]").addEventListener("click", findMyLocation);
+    $("#doctors-map").hidden = true;
     return;
   }
   const radius = Number($("#nearby-radius").value);
   const specialty = $("#nearby-specialty").value;
   const doctors = CareConnectGeo.findNearby(
-    state.osmProviders.filter(provider => provider.category === "healthcare"),
+    state.osmProviders.filter(CareConnectGeo.isDoctor),
     state.location,
     radius,
     specialty
   );
   grid.innerHTML = doctors.length ? doctors.map(doctor => `
-    <article class="nearby-card"><div><div class="doctor-meta">${escapeHtml(doctor.doctor.specialty)} · ${doctor.distanceKm.toFixed(1)} km away</div>
+    <article class="nearby-card"><div><div class="doctor-meta">${escapeHtml(doctor.doctor.specialty)} · ${doctor.distanceKm.toFixed(1)} km away · OpenStreetMap listing</div>
       <h3>${escapeHtml(doctor.name)}</h3><p>${escapeHtml(doctor.address)}</p>
       ${doctor.phone ? `<p><a href="tel:${escapeHtml(doctor.phone.replace(/[^\d+(). -]/g, ""))}">${escapeHtml(doctor.phone)}</a></p>` : ""}
       ${doctor.mapURI ? `<a href="${escapeHtml(doctor.mapURI)}" target="_blank" rel="noopener noreferrer">View OpenStreetMap listing</a>` : ""}</div></article>`).join("")
     : '<p class="empty">No nearby doctors or dentists were found in OpenStreetMap for this distance. Try a wider radius or another specialty.</p>';
+  $("#doctors-map").hidden = !doctors.length;
+  if (doctors.length && currentPage === "doctors") createMap("doctors-map", doctors);
+}
+function renderHospitals() {
+  const grid = $("#hospital-grid");
+  if (!state.location) {
+    grid.innerHTML = `<div class="doctor-location-prompt"><p class="empty">Share or enter your location to find hospitals near you.</p>
+      <button class="button button-primary" type="button" data-find-hospitals>Find hospitals near me</button>
+      <p><a href="/nearby">Choose a town or address instead</a></p></div>`;
+    grid.querySelector("[data-find-hospitals]").addEventListener("click", findMyLocation);
+    $("#hospital-map").hidden = true;
+    return;
+  }
+  const hospitals = CareConnectGeo.findNearby(
+    state.osmProviders.filter(CareConnectGeo.isHospital),
+    state.location,
+    Number($("#nearby-radius").value)
+  );
+  grid.innerHTML = hospitals.length ? hospitals.map(hospital => `
+    <article class="nearby-card"><div><div class="doctor-meta">Hospital · ${hospital.distanceKm.toFixed(1)} km away · OpenStreetMap listing</div>
+      <h3>${escapeHtml(hospital.name)}</h3><p>${escapeHtml(hospital.address)}</p>
+      ${hospital.phone ? `<p><a href="tel:${escapeHtml(hospital.phone.replace(/[^\d+(). -]/g, ""))}">${escapeHtml(hospital.phone)}</a></p>` : ""}
+      ${hospital.openingHours ? `<p>Hours listed: ${escapeHtml(hospital.openingHours)}</p>` : ""}
+      ${hospital.mapURI ? `<a href="${escapeHtml(hospital.mapURI)}" target="_blank" rel="noopener noreferrer">View OpenStreetMap listing</a>` : ""}</div></article>`).join("")
+    : '<p class="empty">No hospitals were found in OpenStreetMap for this distance. Try a wider distance or another location.</p>';
+  $("#hospital-map").hidden = !hospitals.length;
+  if (hospitals.length && currentPage === "hospitals") createMap("hospital-map", hospitals);
 }
 function findMedicalStores() {
   if (!requireSignIn()) return;
@@ -533,8 +574,8 @@ function locationErrorMessage(error) {
   if (error.code === 3) return "Location lookup timed out. Try again when your device has a clearer GPS signal.";
   return "Your browser could not access location. Open this site on localhost or over HTTPS, then try again.";
 }
-function createMap() {
-  const mapElement = $("#clinic-map");
+function createMap(mapId = "clinic-map", providers = state.nearbyClinics) {
+  const mapElement = $(`#${mapId}`);
   mapElement.hidden = false;
   if (!state.map) {
     if (!window.L) throw new Error("The OpenStreetMap map library could not load. Check your internet connection and refresh.");
@@ -550,11 +591,11 @@ function createMap() {
   L.circleMarker(locations[0], { radius: 8, color: "#0f766e", fillColor: "#14b8a6", fillOpacity: 1 })
     .bindPopup("Your location")
     .addTo(state.markers);
-  state.nearbyClinics.forEach((clinic, index) => {
-    const position = [clinic.latitude, clinic.longitude];
+  providers.forEach((provider, index) => {
+    const position = [provider.latitude, provider.longitude];
     locations.push(position);
-    L.marker(position, { title: `${clinic.name || clinic.doctor.name} · ${clinic.doctor.specialty}` })
-      .bindPopup(`<strong>${escapeHtml(index + 1)}. ${escapeHtml(clinic.name || clinic.doctor.name)}</strong><br>${escapeHtml(clinic.doctor.specialty)}`)
+    L.marker(position, { title: `${provider.name || provider.doctor.name} · ${provider.doctor.specialty}` })
+      .bindPopup(`<strong>${escapeHtml(index + 1)}. ${escapeHtml(provider.name || provider.doctor.name)}</strong><br>${escapeHtml(provider.doctor.specialty)}`)
       .addTo(state.markers);
   });
   state.map.fitBounds(L.latLngBounds(locations).pad(0.12), { maxZoom: 14 });
@@ -577,6 +618,7 @@ function renderNearbyClinics() {
   );
   renderDoctors();
   renderAppointmentSuggestions();
+  renderHospitals();
   const directory = $("#nearby-content");
   if (!providers.length) {
     directory.innerHTML = `<p class="empty">No OpenStreetMap-listed providers were returned. Try refreshing your location.</p>${googleMapsFallback("hospitals doctors clinics dentists", "hospitals and doctors")}`;
@@ -858,27 +900,12 @@ function requestUserLocation() {
   $("#nearby-content").innerHTML = '<p class="empty">Getting your location and searching OpenStreetMap for nearby doctors and medical stores…</p>';
   navigator.geolocation.getCurrentPosition(async position => {
     if (!state.user || requestId !== state.locationRequestId) return;
-    state.location = { latitude: position.coords.latitude, longitude: position.coords.longitude };
     button.disabled = false;
     button.textContent = "Refresh nearby doctors";
-    const results = await Promise.allSettled([
-      api("clinics"),
-      loadOpenStreetMapProviders(state.location)
-    ]);
-    if (!state.user || requestId !== state.locationRequestId) return;
-    state.clinics = results[0].status === "fulfilled" ? results[0].value : [];
-    state.osmProviders = results[1].status === "fulfilled" ? results[1].value : [];
-    state.osmSearchError = results[1].status === "rejected" ? results[1].reason.message : "";
-    try {
-      renderNearbyClinics();
-      renderPharmacyStores();
-      renderAppointmentSuggestions();
-    } catch (error) {
-      showToast(error.message);
-    }
-    if (results[0].status === "rejected") showToast(results[0].reason.message);
-    if (results[1].status === "rejected") showToast(results[1].reason.message);
-    $("#route-status").textContent = "Nearby listings are from OpenStreetMap contributors and may be incomplete or outdated. Your location is sent to OpenStreetMap for this search and is not saved by CareConnect.";
+    await searchNearbyAt(
+      { latitude: position.coords.latitude, longitude: position.coords.longitude },
+      "your current GPS location"
+    );
   }, error => {
     if (!state.user || requestId !== state.locationRequestId) return;
     button.disabled = false;
@@ -889,6 +916,9 @@ function requestUserLocation() {
 function clearLocation() {
   state.locationRequestId += 1;
   state.location = null;
+  state.locationLabel = "";
+  sessionStorage.removeItem("careconnect-location");
+  sessionStorage.removeItem("careconnect-location-label");
   state.osmProviders = [];
   state.osmSearchError = "";
   state.nearbyClinics = [];
@@ -905,7 +935,53 @@ function clearLocation() {
   $("#route-status").textContent = "";
   $("#locate-button").disabled = false;
   $("#locate-button").textContent = "Find doctors near me";
+  $("#clear-location-button").hidden = true;
 }
+async function searchNearbyAt(location, label) {
+  const requestId = ++state.locationRequestId;
+  state.location = location;
+  state.locationLabel = label;
+  sessionStorage.setItem("careconnect-location", JSON.stringify(location));
+  sessionStorage.setItem("careconnect-location-label", label);
+  state.osmProviders = [];
+  $("#clear-location-button").hidden = false;
+  $("#nearby-content").innerHTML = `<p class="empty">Searching near ${escapeHtml(label)}…</p>`;
+  $("#route-status").textContent = `Search area: ${label}. This location is stored only in this browser tab and sent for nearby searches.`;
+  const results = await Promise.allSettled([
+    api("clinics"),
+    loadOpenStreetMapProviders(location)
+  ]);
+  if (!state.user || requestId !== state.locationRequestId) return;
+  state.clinics = results[0].status === "fulfilled" ? results[0].value : [];
+  state.osmProviders = results[1].status === "fulfilled" ? results[1].value : [];
+  state.osmSearchError = results[1].status === "rejected" ? results[1].reason.message : "";
+  try {
+    renderNearbyClinics();
+    renderPharmacyStores();
+    renderAppointmentSuggestions();
+  } catch (error) {
+    showToast(error.message);
+  }
+  if (results[0].status === "rejected") showToast(results[0].reason.message);
+  if (results[1].status === "rejected") showToast(results[1].reason.message);
+  $("#route-status").textContent = `Showing nearby results for ${label}. OpenStreetMap listings may be incomplete or outdated. Your location is not saved by CareConnect.`;
+}
+$("#location-search-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!requireSignIn()) return;
+  const form = event.currentTarget;
+  const query = String(new FormData(form).get("query") || "").trim();
+  setLoading(form, true, "Searching place...");
+  try {
+    const result = await api("location/geocode", { method: "POST", body: JSON.stringify({ query }) });
+    await searchNearbyAt({ latitude: result.latitude, longitude: result.longitude }, result.label);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setLoading(form, false);
+  }
+});
+$("#clear-location-button").addEventListener("click", clearLocation);
 (async function init() {
   try {
     [state.departments, state.doctors, state.products, state.clinics] = await Promise.all([
@@ -913,10 +989,15 @@ function clearLocation() {
     ]);
     renderDepartments();
     renderDoctors();
+    renderHospitals();
     renderProducts();
     saveCart();
     const session = await api("me");
     await saveUser(session.user);
+    if (state.user && state.location) {
+      $("#clear-location-button").hidden = false;
+      await searchNearbyAt(state.location, state.locationLabel || "your saved location");
+    } else renderDoctors();
   } catch (error) {
     showToast(error.message);
   }

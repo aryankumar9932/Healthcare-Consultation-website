@@ -63,7 +63,11 @@ global.fetch = async (input, options = {}) => {
     }
   }
   if (hostname === "nominatim.openstreetmap.org") {
-    return new Response(JSON.stringify([{ lat: "12.3456", lon: "78.9012" }]), {
+    return new Response(JSON.stringify([{
+      lat: "12.3456",
+      lon: "78.9012",
+      display_name: "Moradabad, Uttar Pradesh, India"
+    }]), {
       status: 200,
       headers: { "Content-Type": "application/json" }
     });
@@ -105,7 +109,7 @@ test.after(async () => {
 });
 
 test("serves each navigation page at its own URL", async () => {
-  const pages = ["dashboard", "doctors", "nearby", "ai-tools", "ml-service", "pharmacy", "appointments"];
+  const pages = ["dashboard", "doctors", "hospitals", "nearby", "ai-tools", "ml-service", "pharmacy", "appointments"];
   for (const page of pages) {
     const response = await fetch(`${baseUrl}/${page}`);
     assert.equal(response.status, 200, `/${page} should be available`);
@@ -114,6 +118,9 @@ test("serves each navigation page at its own URL", async () => {
     assert.match(html, new RegExp(`href="/${page}"`));
     assert.match(html, new RegExp(`data-page="${page}"`));
   }
+  const hospitalsPage = await (await fetch(`${baseUrl}/hospitals`)).text();
+  assert.match(hospitalsPage, /id="hospital-grid"/);
+  assert.match(hospitalsPage, /id="hospital-map"/);
 });
 
 test("registers a user and protects private appointment and ML routes", async () => {
@@ -153,6 +160,12 @@ test("registers a user and protects private appointment and ML routes", async ()
     body: JSON.stringify({ latitude: 12.3, longitude: 78.9 })
   });
   assert.equal(unauthorizedNearby.status, 401);
+  const unauthorizedLocationSearch = await fetch(`${baseUrl}/api/location/geocode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query: "Moradabad, Uttar Pradesh, India" })
+  });
+  assert.equal(unauthorizedLocationSearch.status, 401);
 
   const prescription = new FormData();
   prescription.set("mode", "prescription");
@@ -215,6 +228,27 @@ test("registers a user and protects private appointment and ML routes", async ()
     body: invalidChatHistory
   });
   assert.equal(invalidHistoryResponse.status, 400);
+});
+
+test("geocodes a signed-in user's manually selected nearby-search location", async () => {
+  const response = await fetch(`${baseUrl}/api/location/geocode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: sessionCookie },
+    body: JSON.stringify({ query: "Moradabad, Uttar Pradesh, India" })
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    latitude: 12.3456,
+    longitude: 78.9012,
+    label: "Moradabad, Uttar Pradesh, India"
+  });
+
+  const invalid = await fetch(`${baseUrl}/api/location/geocode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: sessionCookie },
+    body: JSON.stringify({ query: "x" })
+  });
+  assert.equal(invalid.status, 400);
 });
 
 test("searches nearby OpenStreetMap healthcare listings for signed-in users", async () => {

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { distanceKm, findNearby, filterByCategory, normalizeOpenStreetMapElement } = require("../public/geo");
+const { distanceKm, findNearby, filterByCategory, isDoctor, isHospital, normalizeOpenStreetMapElement } = require("../public/geo");
 
 test("calculates a zero distance for the same coordinates", () => {
   assert.equal(distanceKm({ latitude: 10, longitude: 20 }, { latitude: 10, longitude: 20 }), 0);
@@ -71,4 +71,28 @@ test("normalizes OpenStreetMap pharmacy and healthcare listings", () => {
   assert.equal(healthcare.doctor.specialty, "Dentist");
   assert.equal(healthcare.category, "healthcare");
   assert.equal(normalizeOpenStreetMapElement({ type: "node", id: 1, tags: {} }), null);
+});
+
+test("separates named doctor and hospital listings for their directory pages", () => {
+  const doctor = normalizeOpenStreetMapElement({
+    type: "node",
+    id: 201,
+    lat: 28.84,
+    lon: 78.77,
+    tags: { healthcare: "doctor", name: "Dr Example Clinic" }
+  });
+  const hospital = normalizeOpenStreetMapElement({
+    type: "way",
+    id: 202,
+    center: { lat: 28.85, lon: 78.78 },
+    tags: { amenity: "hospital", name: "Moradabad General Hospital" }
+  });
+  assert.equal(doctor.name, "Dr Example Clinic");
+  assert.equal(doctor.facilityType, "doctor");
+  assert.equal(isDoctor(doctor), true);
+  assert.equal(isHospital(doctor), false);
+  assert.equal(hospital.name, "Moradabad General Hospital");
+  assert.equal(hospital.facilityType, "hospital");
+  assert.equal(isHospital(hospital), true);
+  assert.equal(isDoctor(hospital), false);
 });
