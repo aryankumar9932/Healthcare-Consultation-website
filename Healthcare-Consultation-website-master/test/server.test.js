@@ -10,10 +10,48 @@ process.env.SESSION_SECRET = "test-only-session-secret-that-is-long-enough";
 delete process.env.GEMINI_API_KEY;
 process.env.ADMIN_EMAIL = "admin@example.com";
 process.env.ADMIN_SETUP_TOKEN = "test-only-admin-setup-token-long-enough";
+process.env.ML_SERVICE_URL = "http://ml-service.test";
+process.env.ML_SERVICE_KEY = "test-only-ml-service-key";
 const originalFetch = global.fetch;
 let nearbyQuery = "";
+let mlNoShowInput;
 global.fetch = async (input, options) => {
   const hostname = new URL(input).hostname;
+  if (hostname === "ml-service.test") {
+    const url = new URL(input);
+    if (options.headers["X-Service-Key"] !== process.env.ML_SERVICE_KEY) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    if (url.pathname === "/v1/specialty") {
+      const { symptoms } = JSON.parse(options.body);
+      if (symptoms === "Recurring mild headaches") {
+        return Response.json({
+          specialty: "Neurologist",
+          confidence: 0.3,
+          urgency: "routine",
+          low_confidence: true,
+          emergency_warning: null
+        });
+      }
+      return Response.json({
+        specialty: "Orthopedist",
+        confidence: 0.96,
+        urgency: "routine",
+        low_confidence: false,
+        emergency_warning: null,
+        alternatives: [],
+        disclaimer: "General guidance only."
+      });
+    }
+    if (url.pathname === "/v1/no-show") {
+      mlNoShowInput = JSON.parse(options.body);
+      return Response.json({
+        probability: 18.4,
+        risk: "low",
+        disclaimer: "Synthetic experimental estimate only."
+      });
+    }
+  }
   if (hostname === "nominatim.openstreetmap.org") {
     return new Response(JSON.stringify([{ lat: "12.3456", lon: "78.9012" }]), {
       status: 200,
@@ -190,6 +228,18 @@ test("books appointments in the authenticated session and reports missing Gemini
   assert.equal(list.length, 1);
   assert.equal(list[0].doctor.name, "Dr. Halima");
 
+  const attendanceEstimate = await fetch(`${baseUrl}/api/ml/no-show`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: sessionCookie },
+    body: JSON.stringify({ doctorId: 1, date: appointmentDate })
+  });
+  assert.equal(attendanceEstimate.status, 200);
+  const estimate = await attendanceEstimate.json();
+  assert.equal(estimate.probability, 18);
+  assert.equal(estimate.source, "careconnect-ml");
+  assert.deepEqual(estimate.factors, []);
+  assert.equal(mlNoShowInput.prev_appts, 1);
+
   const nearbyRequest = await fetch(`${baseUrl}/api/appointments`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Cookie: sessionCookie },
@@ -230,10 +280,20 @@ test("books appointments in the authenticated session and reports missing Gemini
   const modelResponse = await fetch(`${baseUrl}/api/ml/recommendations`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Cookie: sessionCookie },
+    body: JSON.stringify({ symptoms: "knee pain while walking" })
+  });
+  assert.equal(modelResponse.status, 200);
+  const recommendation = await modelResponse.json();
+  assert.equal(recommendation.specialty, "Orthopedist");
+  assert.equal(recommendation.source, "careconnect-ml");
+
+  const lowConfidenceModelResponse = await fetch(`${baseUrl}/api/ml/recommendations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: sessionCookie },
     body: JSON.stringify({ symptoms: "Recurring mild headaches" })
   });
-  assert.equal(modelResponse.status, 503);
-  assert.match((await modelResponse.json()).error, /GEMINI_API_KEY/i);
+  assert.equal(lowConfidenceModelResponse.status, 503);
+  assert.match((await lowConfidenceModelResponse.json()).error, /GEMINI_API_KEY/i);
 
   await fetch(`${baseUrl}/api/logout`, { method: "POST", headers: { Cookie: sessionCookie } });
   const loggedOut = await fetch(`${baseUrl}/api/appointments`, { headers: { Cookie: sessionCookie } });

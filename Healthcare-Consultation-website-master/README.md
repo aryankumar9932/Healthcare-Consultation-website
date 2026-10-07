@@ -37,7 +37,7 @@ The administrator enters the real clinic address; it is sent to Nominatim's publ
 
 ## Enable online AI tools
 
-The specialty guide, experimental appointment attendance estimate, document reader, and AI health chat use Google's Gemini API. Create an API key in [Google AI Studio](https://aistudio.google.com/app/apikey), then set it in the PowerShell session used to start CareConnect:
+The document reader and AI health chat use Google's Gemini API. The specialty guide and experimental appointment attendance estimate can use the optional local ML service below; when the specialty model is uncertain or the service is unavailable, specialty recommendations fall back to Gemini. Create an API key in [Google AI Studio](https://aistudio.google.com/app/apikey), then set it in the PowerShell session used to start CareConnect:
 
 ```powershell
 $env:GEMINI_API_KEY="your-private-api-key"
@@ -55,6 +55,34 @@ The document reader accepts pasted text or a PDF, DOCX, TXT, PNG, JPG, JPEG, or 
 The document endpoint accepts PDF, DOCX, TXT, PNG, JPG, and WEBP files up to 8 MB. Images are submitted directly to Gemini, so image reading requires a model that supports image input. There is no substitute or heuristic AI response.
 
 AI output is informational and may be incorrect. Specialty suggestions are not diagnoses; attendance estimates are experimental and not validated; document summaries should be checked with a healthcare professional. AI output must not determine access to care. For urgent or emergency symptoms, contact a qualified clinician or local emergency services.
+
+## Optional local ML service
+
+The optional FastAPI service provides a TF-IDF/logistic-regression specialty suggestion with a separate emergency-keyword warning, plus an experimental appointment no-show estimate. Both models are trained from synthetic demonstration data only. The reported metrics are measurements on synthetic holdout data, not evidence of real-world accuracy, clinical safety, or calibration. Have clinicians review the symptom rules and retrain and validate using appropriately consented, de-identified data before any real-world use. Never use the no-show estimate to deny, delay, penalize, or overbook care; at most, it may inform an additional reminder.
+
+For local development, use Python 3.12, train the models, and start the service in a second PowerShell window:
+
+```powershell
+cd ml-service
+python -m pip install -r requirements.txt
+python train.py
+$env:ML_SERVICE_KEY="replace-with-a-private-random-service-key"
+python -m uvicorn app:app --host 127.0.0.1 --port 8000
+```
+
+Start the Node app in another window with the same key:
+
+```powershell
+$env:ML_SERVICE_URL="http://127.0.0.1:8000"
+$env:ML_SERVICE_KEY="replace-with-a-private-random-service-key"
+npm start
+```
+
+If the local service is not configured or is unavailable, the app falls back to Gemini for specialty recommendations and attendance estimates. The service requires `ML_SERVICE_KEY`; keep it private. It accepts symptom text for specialty suggestions, and appointment timing, fee, and coarse attendance-history features for no-show estimates. Because CareConnect does not collect age or reminder-delivery history, those two model inputs use fixed demo defaults. Do not expose the ML service directly to the public internet.
+
+To run the container stack, set long random `SESSION_SECRET` and `ML_SERVICE_KEY` values, then run `docker compose up --build`. Gemini remains optional, but its tools require `GEMINI_API_KEY`.
+
+See [REVIEW_AND_ROADMAP.md](./REVIEW_AND_ROADMAP.md) for limitations and recommended production work.
 
 ## Production configuration
 

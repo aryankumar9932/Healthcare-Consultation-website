@@ -1,8 +1,8 @@
-node_modules/
+.git
 .env
+node_modules
 data/db.json
 data/*.tmp
-admin/Res_img/pres/
+admin/Res_img/pres
 ml-service/models/*.joblib
 ml-service/models/metrics.json
-ml-service/**/__pycache__/

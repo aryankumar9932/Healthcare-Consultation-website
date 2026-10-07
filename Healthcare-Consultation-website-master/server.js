@@ -8,6 +8,7 @@ const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const { analyzeDocument, chatWithHealthAssistant, predictNoShow, readPrescription, recommendSpecialty } = require("./ml");
 const { normalizeOpenStreetMapElement } = require("./public/geo");
+const mlService = require("./ml-client");
 
 const root = __dirname;
 const publicDir = path.join(root, "public");
@@ -485,7 +486,32 @@ function createApp() {
       if (symptoms.length < 5 || symptoms.length > 1500) {
         return res.status(400).json({ error: "Describe your concern in 5 to 1,500 characters." });
       }
-      res.json(await recommendSpecialty(symptoms, readDb().doctors.map(doctor => doctor.specialty)));
+      const specialties = readDb().doctors.map(doctor => doctor.specialty);
+      const local = await mlService.specialty(symptoms, specialties);
+      const matchedSpecialty = local && specialties.find(
+        item => item.toLowerCase() === String(local.specialty || "").toLowerCase()
+      );
+      const confidence = Number(local && local.confidence);
+      const isEmergency = local && typeof local.emergency_warning === "string" && local.emergency_warning.length > 0;
+      if (matchedSpecialty && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1 &&
+          ["routine", "soon", "urgent"].includes(local.urgency) &&
+          (!local.low_confidence || isEmergency)) {
+        return res.json({
+          specialty: matchedSpecialty,
+          urgency: local.urgency,
+          rationale: isEmergency
+            ? local.emergency_warning
+            : `Matched with ${Math.round(confidence * 100)}% confidence by the CareConnect model.`,
+          alternatives: Array.isArray(local.alternatives) ? local.alternatives : [],
+          disclaimer: local.disclaimer || "General guidance only, not a diagnosis.",
+          source: "careconnect-ml"
+        });
+      }
+      if (local && (!matchedSpecialty || !Number.isFinite(confidence) ||
+          confidence < 0 || confidence > 1 || !["routine", "soon", "urgent"].includes(local.urgency))) {
+        console.warn("CareConnect ML service returned an invalid specialty result; using Gemini fallback.");
+      }
+      res.json(await recommendSpecialty(symptoms, specialties));
     } catch (error) {
       next(error);
     }
@@ -501,6 +527,31 @@ function createApp() {
         return res.status(400).json({ error: "Choose a doctor and a future appointment date." });
       }
       const history = db.appointments.filter(item => item.userId === req.user.id);
+      const when = new Date(date);
+      const local = await mlService.noShow({
+        lead_days: Math.max(0, Math.round((when - Date.now()) / 864e5)),
+        hour: when.getHours(),
+        dow: when.getDay(),
+        prev_appts: history.length,
+        prev_noshow: history.filter(item => item.status === "No-show").length,
+        age: 40,
+        reminder: 1,
+        fee: doctor.fee
+      });
+      const probability = Number(local && local.probability);
+      if (Number.isFinite(probability) && probability >= 0 && probability <= 100 &&
+          ["low", "moderate", "high"].includes(local.risk)) {
+        return res.json({
+          probability: Math.round(probability),
+          risk: local.risk,
+          factors: [],
+          disclaimer: local.disclaimer || "Experimental operational estimate only; never use this to deny or delay care.",
+          source: "careconnect-ml"
+        });
+      }
+      if (local) {
+        console.warn("CareConnect ML service returned an invalid attendance estimate; using Gemini fallback.");
+      }
       const result = await predictNoShow({
         doctor: doctor.specialty,
         appointmentDate: date,

@@ -1,0 +1,20 @@
+services:
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      SESSION_SECRET: ${SESSION_SECRET:?set a long random session secret}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ML_SERVICE_URL: http://ml:8000
+      ML_SERVICE_KEY: ${ML_SERVICE_KEY:?set a long random ML service key}
+    volumes:
+      - appdata:/app/data
+    depends_on:
+      - ml
+  ml:
+    build: ./ml-service
+    environment:
+      ML_SERVICE_KEY: ${ML_SERVICE_KEY:?set a long random ML service key}
+volumes:
+  appdata:
