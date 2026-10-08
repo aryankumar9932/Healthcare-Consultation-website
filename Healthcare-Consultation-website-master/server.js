@@ -11,6 +11,8 @@ const { normalizeOpenStreetMapElement } = require("./public/geo");
 const mlService = require("./ml-client");
 const { createStore } = require("./db");
 const { applySecurityHeaders, csrfToken, csrfProtection, defaultLimits, limiter } = require("./security");
+const { createMailer, templates } = require("./mailer");
+const { PURPOSES, TTL_MS, generateToken, hashToken, looksLikeToken } = require("./authtokens");
 const { encryptionKey, encryptClinicalData, decryptClinicalData, extractReportMeasurements, extractReportHistory } = require("./clinical");
 
 const root = __dirname;
@@ -24,6 +26,16 @@ const clinicalEncryptionKey = encryptionKey(process.env.REPORT_ENCRYPTION_KEY ||
 if (process.env.NODE_ENV === "production" && !process.env.SESSION_SECRET) {
   throw new Error("SESSION_SECRET must be set in production.");
 }
+if (process.env.NODE_ENV === "production" && !process.env.APP_URL) {
+  throw new Error("APP_URL (for example https://care.example.com) must be set in production: it is used for links in emails.");
+}
+// Links in emails are built from this fixed value, never from the request's Host header (prevents poisoned reset links).
+const appUrl = (process.env.APP_URL || `http://localhost:${port}`).replace(/\/+$/, "");
+const mailer = createMailer();
+// Email confirmation is enforced when emails can actually be delivered (or when REQUIRE_VERIFIED_EMAIL=true).
+const verificationRequired = () => process.env.REQUIRE_VERIFIED_EMAIL
+  ? process.env.REQUIRE_VERIFIED_EMAIL === "true"
+  : mailer.canDeliver;
 
 const store = createStore({ dbFile });
 const ready = store.init();
@@ -49,7 +61,7 @@ function publicUser(user) {
 }
 
 function sessionUser(user) {
-  return { ...publicUser(user), isAdmin: isAdmin(user), canBootstrapAdmin: canBootstrapAdmin(user) };
+  return { ...publicUser(user), emailVerified: Boolean(user.emailVerifiedAt), emailVerificationRequired: verificationRequired(), isAdmin: isAdmin(user), canBootstrapAdmin: canBootstrapAdmin(user) };
 }
 
 function validBootstrapToken(value) {
@@ -111,13 +123,39 @@ function requireAdmin(req, res, next) {
 }
 
 // Replace the session id after a privilege change (prevents session fixation).
+// The session is saved to the store *before* the response is sent: express-session otherwise starts
+// sending the response while the (PostgreSQL) write is still in flight, so a fast follow-up request
+// could arrive before the new session exists.
 const startSession = (req, userId) => new Promise((resolve, reject) => {
   req.session.regenerate(error => {
     if (error) return reject(error);
     req.session.userId = userId;
-    resolve();
+    req.session.save(saveError => (saveError ? reject(saveError) : resolve()));
   });
 });
+
+const requireVerifiedEmail = (req, res, next) => {
+  if (!verificationRequired() || req.user.emailVerifiedAt) return next();
+  res.status(403).json({
+    error: "Please confirm your email address first. Check your inbox for the confirmation link, or request a new one.",
+    code: "EMAIL_NOT_VERIFIED"
+  });
+};
+
+// Emails are sent after the response, so delivery problems never break sign-up or leak whether an account exists.
+const background = task => Promise.resolve(task).catch(error => console.error("Email delivery failed:", error.code || error.message));
+
+async function sendVerificationEmail(user) {
+  const { token, hash } = generateToken();
+  await store.createAuthToken({ userId: user.id, purpose: PURPOSES.verifyEmail, hash, expiresAt: Date.now() + TTL_MS.verify_email });
+  await mailer.send({ to: user.email, ...templates.verifyEmail({ name: user.name, url: `${appUrl}/verify-email?token=${token}`, hours: TTL_MS.verify_email / 3600000 }) });
+}
+async function sendPasswordResetEmail(user) {
+  const { token, hash } = generateToken();
+  await store.createAuthToken({ userId: user.id, purpose: PURPOSES.resetPassword, hash, expiresAt: Date.now() + TTL_MS.reset_password });
+  await mailer.send({ to: user.email, ...templates.resetPassword({ name: user.name, url: `${appUrl}/reset-password?token=${token}`, minutes: TTL_MS.reset_password / 60000 }) });
+}
+const validPassword = value => typeof value === "string" && value.length >= 8 && value.length <= 128;
 
 let lastGeocodeAt = 0;
 async function searchOpenStreetMapAddress(address) {
@@ -183,7 +221,7 @@ function validDateOfBirth(value) {
 }
 
 function createApp(options = {}) {
-  const limits = { ...defaultLimits(), ...(options.limits || {}) };
+  const limits = { ...defaultLimits(), resendCooldownMs: 60 * 1000, ...(options.limits || {}) };
   const app = express();
   const activeVideoCalls = new Map();
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 4 } });
@@ -216,6 +254,8 @@ function createApp(options = {}) {
   app.use("/api/login", authLimiter);
   app.use("/api/register", authLimiter);
   app.use("/api/ml", aiLimiter);
+  app.use("/api/password", limiter(limits.reset, "Too many password requests from this network. Try again later."));
+  app.use("/api/email", limiter(limits.email, "Too many email requests from this network. Try again later."));
   app.use("/api", csrfProtection);
 
   app.get("/api/csrf", (req, res) => res.json({ csrfToken: csrfToken(req) }));
@@ -301,6 +341,7 @@ function createApp(options = {}) {
     if (!user) return res.status(409).json({ error: "An account with that email already exists." });
     await startSession(req, user.id);
     res.status(201).json({ user: sessionUser(user) });
+    background(sendVerificationEmail(user));
   }));
 
   app.post("/api/login", wrap(async (req, res) => {
@@ -336,6 +377,71 @@ function createApp(options = {}) {
     });
   });
 
+  // ---- Email confirmation ----
+  app.post("/api/email/verify", wrap(async (req, res) => {
+    const token = (req.body || {}).token;
+    const spent = looksLikeToken(token) ? await store.consumeAuthToken(hashToken(token), PURPOSES.verifyEmail) : null;
+    if (!spent) return res.status(400).json({ error: "This confirmation link is invalid or has expired. Sign in and request a new one." });
+    await store.markEmailVerified(spent.userId);
+    res.json({ verified: true });
+  }));
+  app.post("/api/email/verify/resend", requireUser, wrap(async (req, res) => {
+    if (req.user.emailVerifiedAt) return res.json({ alreadyVerified: true });
+    if (!mailer.canDeliver) return res.status(503).json({ error: "Email delivery is not configured on this server." });
+    const last = await store.lastAuthTokenIssuedAt(req.user.id, PURPOSES.verifyEmail);
+    const wait = last ? limits.resendCooldownMs - (Date.now() - last.getTime()) : 0;
+    if (wait > 0) {
+      res.setHeader("Retry-After", String(Math.ceil(wait / 1000)));
+      return res.status(429).json({ error: `Please wait ${Math.ceil(wait / 1000)} seconds before requesting another email.` });
+    }
+    await sendVerificationEmail(req.user);
+    res.status(202).json({ sent: true });
+  }));
+
+  // ---- Password reset and change ----
+  app.post("/api/password/forgot", wrap(async (req, res) => {
+    const email = String((req.body || {}).email || "").trim().toLowerCase().slice(0, 254);
+    const user = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? await store.getUserByEmail(email) : null;
+    if (user) {
+      const last = await store.lastAuthTokenIssuedAt(user.id, PURPOSES.resetPassword);
+      if (!last || Date.now() - last.getTime() >= limits.resendCooldownMs) background(sendPasswordResetEmail(user));
+    }
+    // Same answer whether or not the account exists (no account enumeration).
+    res.status(202).json({ message: "If an account exists for that email, we have sent a link to reset the password." });
+  }));
+  app.post("/api/password/reset", wrap(async (req, res) => {
+    const { token, password } = req.body || {};
+    if (!validPassword(password)) return res.status(400).json({ error: "Choose a password of 8 to 128 characters." }); // checked first so a typo does not burn the link
+    const spent = looksLikeToken(token) ? await store.consumeAuthToken(hashToken(token), PURPOSES.resetPassword) : null;
+    if (!spent) return res.status(400).json({ error: "This reset link is invalid or has expired. Request a new one." });
+    const user = await store.setUserPassword(spent.userId, hashPassword(password));
+    await store.markEmailVerified(user.id); // receiving the link proves control of the mailbox
+    await store.revokeAuthTokens(user.id, PURPOSES.resetPassword);
+    await store.clearLoginFailures(user.email.toLowerCase());
+    await store.destroyUserSessions(user.id); // sign out everywhere, including anyone who had the old password
+    background(mailer.send({ to: user.email, ...templates.passwordChanged({ name: user.name }) }));
+    res.json({ ok: true });
+  }));
+  app.post("/api/password/change", requireUser, wrap(async (req, res) => {
+    const { currentPassword, newPassword } = req.body || {};
+    if (!validPassword(newPassword) || typeof currentPassword !== "string") {
+      return res.status(400).json({ error: "Enter your current password and a new password of 8 to 128 characters." });
+    }
+    if (newPassword === currentPassword) return res.status(400).json({ error: "Choose a password different from the current one." });
+    const key = req.user.email.toLowerCase();
+    const lock = await store.getLoginLock(key); // a stolen session must not be able to brute-force the password
+    if (lock.locked) return res.status(429).json({ error: "Too many failed attempts. Try again later." });
+    if (!verifyPassword(currentPassword.slice(0, 128), req.user.password)) {
+      await store.recordLoginFailure(key, limits.lockout);
+      return res.status(401).json({ error: "Your current password is incorrect." });
+    }
+    await store.clearLoginFailures(key);
+    await store.setUserPassword(req.user.id, hashPassword(newPassword));
+    await store.destroyUserSessions(req.user.id, req.sessionID); // other devices are signed out
+    background(mailer.send({ to: req.user.email, ...templates.passwordChanged({ name: req.user.name }) }));
+    res.json({ ok: true });
+  }));
+
   app.post("/api/admin/bootstrap", requireUser, wrap(async (req, res) => {
     if (isAdmin(req.user)) return res.status(409).json({ error: "This account is already an administrator." });
     if (!canBootstrapAdmin(req.user) || !validBootstrapToken((req.body || {}).setupToken)) {
@@ -365,6 +471,7 @@ function createApp(options = {}) {
     });
     if (!user) return res.status(409).json({ error: "That email or doctor profile already has an account." });
     res.status(201).json({ user: sessionUser(user), doctor });
+    background(sendVerificationEmail(user));
   }));
   app.get("/api/admin/analytics", requireUser, requireAdmin, wrap(async (req, res) => {
     res.json(await store.adminAnalytics());
@@ -429,7 +536,7 @@ function createApp(options = {}) {
     res.json(await store.listAppointmentsForUser(req.user.id));
   }));
 
-  app.post("/api/appointments", requireUser, requirePatient, wrap(async (req, res) => {
+  app.post("/api/appointments", requireUser, requirePatient, requireVerifiedEmail, wrap(async (req, res) => {
     const body = req.body || {};
     const requestedDoctorId = Number(body.doctorId);
     const doctor = Number.isSafeInteger(requestedDoctorId) && requestedDoctorId > 0
@@ -579,7 +686,7 @@ function createApp(options = {}) {
       };
     })));
   }));
-  app.post("/api/patient/reports", requireUser, requirePatient, upload.single("report"), wrap(async (req, res) => {
+  app.post("/api/patient/reports", requireUser, requirePatient, requireVerifiedEmail, upload.single("report"), wrap(async (req, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ error: "Choose a medical report file to upload." });
     const extension = path.extname(file.originalname).toLowerCase();
@@ -720,7 +827,7 @@ function createApp(options = {}) {
     res.json(await store.listOrdersForUser(req.user.id));
   }));
 
-  app.post("/api/orders", requireUser, wrap(async (req, res) => {
+  app.post("/api/orders", requireUser, requireVerifiedEmail, wrap(async (req, res) => {
     const body = req.body || {};
     if (!Array.isArray(body.items) || !body.items.length || body.items.length > 30) {
       return res.status(400).json({ error: "Your cart is empty or contains too many items." });
@@ -949,6 +1056,12 @@ function createApp(options = {}) {
   app.get(["/dashboard", "/doctors", "/hospitals", "/nearby", "/ai-tools", "/ml-service", "/pharmacy", "/appointments", "/doctor"], (req, res) => {
     res.sendFile(path.join(publicDir, "index.html"));
   });
+  // Pages opened from email links carry a one-time token in the URL: never cache them or leak them via Referer.
+  app.get(["/verify-email", "/reset-password"], (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.sendFile(path.join(publicDir, "index.html"));
+  });
   app.use((req, res) => res.status(404).json({ error: "Not found." }));
 
   app.use((error, req, res, next) => {
@@ -972,11 +1085,16 @@ function createApp(options = {}) {
 const app = createApp();
 if (require.main === module) {
   ready.then(() => {
-    app.listen(port, () => console.log(`Healthcare Consultation running at http://localhost:${port} (database: ${store.driver})`));
+    app.listen(port, () => console.log(`Healthcare Consultation running at http://localhost:${port} (database: ${store.driver}, email: ${mailer.mode})`));
+    if (mailer.mode === "disabled") {
+      console.warn("WARNING: email is not configured (set SMTP_URL or SMTP_HOST). Verification and password-reset emails cannot be sent, and email confirmation is not enforced.");
+    } else if (mailer.mode === "console") {
+      console.warn("NOTE: email transport is 'console': messages (including links) are printed here instead of being sent.");
+    }
   }).catch(error => {
     console.error("Failed to initialise the database:", error.message);
     process.exit(1);
   });
 }
 
-module.exports = { app, createApp, store, ready, hashPassword, verifyPassword };
+module.exports = { app, createApp, store, ready, mailer, hashPassword, verifyPassword };

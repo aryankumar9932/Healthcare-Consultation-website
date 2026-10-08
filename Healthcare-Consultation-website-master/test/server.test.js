@@ -7,6 +7,8 @@ const path = require("node:path");
 const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "careconnect-test-"));
 process.env.DB_FILE = path.join(dataDirectory, "db.json");
 process.env.SESSION_SECRET = "test-only-session-secret-that-is-long-enough";
+process.env.MAIL_TRANSPORT = "memory"; // no real email in tests
+process.env.REQUIRE_VERIFIED_EMAIL = "false"; // enforcement is tested in auth-email.test.js
 delete process.env.GEMINI_API_KEY;
 process.env.ADMIN_EMAIL = "admin@example.com";
 process.env.ADMIN_SETUP_TOKEN = "test-only-admin-setup-token-long-enough";

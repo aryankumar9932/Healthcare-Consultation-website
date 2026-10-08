@@ -25,6 +25,11 @@ services:
       ML_SERVICE_KEY: ${ML_SERVICE_KEY:?set a long random ML service key}
       # Set to 1 when running behind one reverse proxy / load balancer (needed for client IPs + Secure cookies).
       TRUST_PROXY: ${TRUST_PROXY:-}
+      # Public address used in confirmation / reset links (must be set in production images).
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      # Optional email delivery. Without SMTP_URL, emails are not sent and confirmation is not enforced.
+      SMTP_URL: ${SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-CareConnect <no-reply@localhost>}
     depends_on:
       db:
         condition: service_healthy

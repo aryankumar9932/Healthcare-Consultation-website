@@ -26,7 +26,8 @@ const seed = {
   orders: [],
   clinics: [],
   prescriptions: [],
-  medicalReports: []
+  medicalReports: [],
+  authTokens: []
 };
 
 module.exports = { seed };

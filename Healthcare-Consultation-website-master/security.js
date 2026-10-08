@@ -14,6 +14,8 @@ function defaultLimits() {
     api:     { windowMs: 15 * 60 * 1000, limit: intEnv("RATE_LIMIT_API", 600) },   // all /api traffic per IP
     auth:    { windowMs: 15 * 60 * 1000, limit: intEnv("RATE_LIMIT_AUTH", 20) },   // login + register per IP
     ai:      { windowMs: 60 * 60 * 1000, limit: intEnv("RATE_LIMIT_AI", 60) },     // paid AI endpoints per IP
+    reset:   { windowMs: 15 * 60 * 1000, limit: intEnv("RATE_LIMIT_RESET", 10) },  // forgot/reset/change password per IP
+    email:   { windowMs: 60 * 60 * 1000, limit: intEnv("RATE_LIMIT_EMAIL", 30) },  // verification + resend per IP
     lockout: { maxFailures: intEnv("LOGIN_MAX_FAILURES", 5), lockMs: intEnv("LOGIN_LOCK_MINUTES", 15) * 60 * 1000 }
   };
 }

@@ -23,6 +23,7 @@
     "helmet": "^8.3.0",
     "mammoth": "^1.9.1",
     "multer": "^2.0.2",
+    "nodemailer": "^10.0.16",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.20.2",
     "pg": "^8.23.1"
@@ -31,5 +32,8 @@
     "mammoth": {
       "argparse": "^2.0.1"
     }
+  },
+  "devDependencies": {
+    "smtp-server": "^3.19.18"
   }
 }

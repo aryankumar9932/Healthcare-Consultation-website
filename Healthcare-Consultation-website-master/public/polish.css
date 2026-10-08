@@ -1333,3 +1333,11 @@ footer {
     grid-template-columns: 1fr;
   }
 }
+
+/* Email confirmation banner and account helper links */
+.verify-banner { display: flex; gap: 14px; align-items: center; justify-content: center; flex-wrap: wrap; padding: 10px 6vw; background: #fff6e0; color: #6b4a00; border-bottom: 1px solid #f1dfae; font-size: 14px; text-align: center; }
+.verify-banner[hidden], #password-button[hidden] { display: none; }
+.verify-banner .button { padding: 6px 14px; font-size: 13px; }
+.auth-help { margin: 14px 0 0; font-size: 13px; }
+.link-button { background: none; border: 0; padding: 0; color: var(--teal); font: inherit; text-decoration: underline; cursor: pointer; }
+.link-button:hover, .link-button:focus-visible { color: var(--ink); }

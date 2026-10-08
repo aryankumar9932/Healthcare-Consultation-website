@@ -36,6 +36,14 @@ const pageTitles = {
   pharmacy: "Pharmacy",
   appointments: "My appointments"
 };
+// Pages opened from an email link carry a one-time token: read it once and remove it from the address bar/history.
+const emailLink = (() => {
+  const path = window.location.pathname;
+  if (path !== "/verify-email" && path !== "/reset-password") return null;
+  const token = new URLSearchParams(window.location.search).get("token") || "";
+  window.history.replaceState(null, "", "/dashboard");
+  return { path, token };
+})();
 const requestedPage = window.location.pathname.slice(1);
 const currentPage = Object.hasOwn(pageTitles, requestedPage) ? requestedPage : "dashboard";
 const currentPath = currentPage === "dashboard" && window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
@@ -256,6 +264,12 @@ function renderHeader() {
   document.body.classList.toggle("auth-required", !state.user);
   $("#user-label").textContent = state.user ? `Hi, ${state.user.name.split(" ")[0]}` : "";
   $("#auth-button").textContent = state.user ? "Sign out" : "Sign in";
+  $("#password-button").hidden = !state.user;
+  const unconfirmed = Boolean(state.user && state.user.emailVerified === false && state.user.emailVerificationRequired);
+  $("#verify-banner").hidden = !unconfirmed;
+  if (unconfirmed) {
+    $("#verify-banner-text").textContent = `Confirm your email address (${state.user.email}) to book appointments, order medicines and upload reports. Check your inbox for our message.`;
+  }
   $("#doctor-nav").hidden = state.user?.role !== "doctor";
   $("#admin-clinics").hidden = !state.user?.isAdmin;
   $("#admin-bootstrap-section").hidden = !state.user?.canBootstrapAdmin;
@@ -522,9 +536,11 @@ function openAuth(mode = "signin", message = "") {
     <form id="auth-form">${isRegister ? '<label>Full name<input name="name" maxlength="100" required></label>' : ""}
     <label>Email<input name="email" type="email" required></label>${isRegister ? '<label>Phone<input name="phone" maxlength="40"></label><label>Date of birth <span>(optional, for age-range health analytics)</span><input name="dateOfBirth" type="date" max="${new Date().toISOString().slice(0, 10)}"></label>' : ""}
     <label>Password<input name="password" type="password" minlength="8" maxlength="128" required></label>
-    <button class="button button-primary" type="submit">${isRegister ? "Create account" : "Sign in"}</button></form>`;
+    <button class="button button-primary" type="submit">${isRegister ? "Create account" : "Sign in"}</button></form>
+    ${!isRegister ? '<p class="auth-help"><button type="button" class="link-button" id="forgot-link">Forgot your password?</button></p>' : ""}`;
   if (!$("#auth-dialog").open) $("#auth-dialog").showModal();
   document.querySelectorAll("[data-auth-mode]").forEach(button => button.addEventListener("click", () => openAuth(button.dataset.authMode)));
+  $("#forgot-link")?.addEventListener("click", () => openForgotPassword($("#auth-form [name=email]").value));
   $("#auth-form").addEventListener("submit", async event => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.target));
@@ -846,6 +862,112 @@ async function showDrivingRoute(clinicId, button) {
   window.open(route.href, "_blank", "noopener,noreferrer");
   $("#route-status").textContent = "Driving directions opened in OpenStreetMap. Route availability and travel estimates are provided by its routing service.";
 }
+// ---- Email confirmation, password reset and change ----
+function showAuthPanel(html) {
+  $("#auth-dialog").querySelector("[data-close]").hidden = !state.user;
+  $("#auth-content").innerHTML = `<div class="auth-panel"><p class="eyebrow">CARECONNECT ACCOUNT</p>${html}</div>`;
+  if (!$("#auth-dialog").open) $("#auth-dialog").showModal();
+}
+function openForgotPassword(email = "") {
+  showAuthPanel(`<h2>Reset your password</h2><p class="auth-intro">Enter your account email and we will send you a link to choose a new password.</p>
+    <form id="forgot-form"><label>Email<input name="email" type="email" required value="${escapeHtml(email)}"></label>
+    <button class="button button-primary" type="submit">Send reset link</button></form>
+    <p class="auth-help"><button type="button" class="link-button" id="back-to-signin">Back to sign in</button></p>`);
+  $("#back-to-signin").addEventListener("click", () => openAuth("signin"));
+  $("#forgot-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const button = event.target.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      const result = await api("password/forgot", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
+      event.target.outerHTML = `<p class="doctor-meta" role="status">${escapeHtml(result.message)} The link is valid for 1 hour.</p>`;
+    } catch (error) {
+      showToast(error.message);
+      button.disabled = false;
+    }
+  });
+}
+function openResetPassword(token) {
+  showAuthPanel(`<h2>Choose a new password</h2><p class="auth-intro">Pick a password of at least 8 characters. You will be signed out on all devices.</p>
+    <form id="reset-form"><label>New password<input name="password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+    <label>Confirm new password<input name="confirm" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+    <button class="button button-primary" type="submit">Save new password</button></form>`);
+  $("#reset-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const { password, confirm } = Object.fromEntries(new FormData(event.target));
+    if (password !== confirm) return showToast("The two passwords do not match.");
+    const button = event.target.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      await api("password/reset", { method: "POST", body: JSON.stringify({ token, password }) });
+      state.user = null; // the server signed this browser out too
+      renderHeader();
+      showAuthPanel('<h2>Password updated</h2><p class="auth-intro">Your password was changed and every device was signed out. Sign in with your new password.</p><button class="button button-primary" type="button" id="reset-done">Sign in</button>');
+      $("#reset-done").addEventListener("click", () => openAuth("signin"));
+    } catch (error) {
+      showToast(error.message);
+      button.disabled = false;
+      if (/invalid or has expired/.test(error.message)) {
+        event.target.outerHTML = '<p class="doctor-meta">This reset link has expired or was already used.</p><button class="button button-primary" type="button" id="request-new-link">Request a new link</button>';
+        $("#request-new-link").addEventListener("click", () => openForgotPassword());
+      }
+    }
+  });
+}
+function openChangePassword() {
+  if (!state.user) return openAuth();
+  showAuthPanel(`<h2>Change password</h2><p class="auth-intro">Other devices will be signed out after you change it.</p>
+    <form id="change-form"><label>Current password<input name="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></label>
+    <label>New password<input name="newPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+    <label>Confirm new password<input name="confirm" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+    <button class="button button-primary" type="submit">Change password</button></form>`);
+  $("#change-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const { currentPassword, newPassword, confirm } = Object.fromEntries(new FormData(event.target));
+    if (newPassword !== confirm) return showToast("The two new passwords do not match.");
+    try {
+      await api("password/change", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) });
+      $("#auth-dialog").close();
+      showToast("Password changed. Other devices were signed out.");
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+}
+$("#password-button").addEventListener("click", openChangePassword);
+$("#resend-verification").addEventListener("click", async event => {
+  event.target.disabled = true;
+  try {
+    const result = await api("email/verify/resend", { method: "POST" });
+    showToast(result.alreadyVerified ? "Your email is already confirmed." : "Confirmation email sent. Check your inbox.");
+    if (result.alreadyVerified) await refreshUser();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    event.target.disabled = false;
+  }
+});
+async function refreshUser() {
+  const session = await api("me");
+  await saveUser(session.user);
+}
+async function handleEmailLink() {
+  if (!emailLink) return;
+  if (emailLink.path === "/verify-email") {
+    try {
+      await api("email/verify", { method: "POST", body: JSON.stringify({ token: emailLink.token }) });
+      if (state.user) await refreshUser();
+      showToast("Email confirmed. Thank you!");
+    } catch (error) {
+      showToast(error.message);
+    }
+  } else if (emailLink.token) {
+    openResetPassword(emailLink.token);
+  } else {
+    openForgotPassword();
+  }
+}
+
 $("#auth-button").addEventListener("click", async () => {
   if (!state.user) return openAuth();
   try {
@@ -1320,6 +1442,7 @@ $("#clear-location-button").addEventListener("click", clearLocation);
       $("#clear-location-button").hidden = false;
       await searchNearbyAt(state.location, state.locationLabel || "your saved location");
     } else renderDoctors();
+    await handleEmailLink();
   } catch (error) {
     showToast(error.message);
   }

@@ -10,6 +10,7 @@ const mapUser = r => r && ({
   id: r.id, name: r.name, email: r.email, phone: r.phone, password: r.password,
   ...(r.doctor_id ? { doctorId: r.doctor_id } : {}),
   ...(r.date_of_birth ? { dateOfBirth: iso(r.date_of_birth) } : {}),
+  ...(r.email_verified_at ? { emailVerifiedAt: iso(r.email_verified_at) } : {}),
   ...(r.role !== "patient" ? { role: r.role } : {}), createdAt: iso(r.created_at)
 });
 const mapDoctor = r => r && ({
@@ -136,6 +137,36 @@ function createPgStore(connectionString, options = {}) {
       const { rows } = await q("SELECT id FROM users WHERE doctor_id=$1 AND role='doctor'", [doctorId]);
       return rows[0]?.id || null;
     },
+    // ---- email verification / password reset ----
+    async createAuthToken({ userId, purpose, hash, expiresAt }) {
+      // At most one live token per user and purpose: issuing a new one revokes the previous link.
+      await q("DELETE FROM auth_tokens WHERE user_id=$1 AND purpose=$2 AND used_at IS NULL", [userId, purpose]);
+      await q("DELETE FROM auth_tokens WHERE expires_at < now() - interval '7 days'");
+      await q("INSERT INTO auth_tokens(user_id,purpose,token_hash,expires_at) VALUES ($1,$2,$3,$4)", [userId, purpose, hash, new Date(expiresAt)]);
+    },
+    // Atomically spends a token. Returns { userId } or null (unknown, expired, or already used).
+    async consumeAuthToken(hash, purpose) {
+      const { rows } = await q("UPDATE auth_tokens SET used_at=now() WHERE token_hash=$1 AND purpose=$2 AND used_at IS NULL AND expires_at > now() RETURNING user_id", [hash, purpose]);
+      return rows[0] ? { userId: rows[0].user_id } : null;
+    },
+    async revokeAuthTokens(userId, purpose) {
+      await q("DELETE FROM auth_tokens WHERE user_id=$1 AND purpose=$2 AND used_at IS NULL", [userId, purpose]);
+    },
+    async lastAuthTokenIssuedAt(userId, purpose) {
+      const { rows } = await q("SELECT max(created_at) AS at FROM auth_tokens WHERE user_id=$1 AND purpose=$2", [userId, purpose]);
+      return rows[0].at ? new Date(rows[0].at) : null;
+    },
+    async markEmailVerified(userId) {
+      return mapUser((await q("UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id=$1 RETURNING *", [userId])).rows[0]) || null;
+    },
+    async setUserPassword(userId, passwordHash) {
+      return mapUser((await q("UPDATE users SET password=$2 WHERE id=$1 RETURNING *", [userId, passwordHash])).rows[0]) || null;
+    },
+    // Signs the user out everywhere, optionally keeping one session (the one making the change).
+    async destroyUserSessions(userId, exceptSid) {
+      await q("DELETE FROM session WHERE sess->>'userId' = $1 AND sid <> $2", [String(userId), exceptSid || ""]);
+    },
+
     async setUserRole(id, role) {
       return mapUser((await q("UPDATE users SET role=$2 WHERE id=$1 RETURNING *", [id, role])).rows[0]) || null;
     },

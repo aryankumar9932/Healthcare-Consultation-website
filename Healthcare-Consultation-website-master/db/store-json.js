@@ -5,6 +5,7 @@ const { seed } = require("./seed");
 
 function createJsonStore(dbFile) {
   const lockouts = new Map(); // dev-only, in memory
+  let memorySessions = null;
   const idFor = list => list.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1;
 
   function ensureDb() {
@@ -37,7 +38,7 @@ function createJsonStore(dbFile) {
 
   return {
     driver: "json",
-    sessionStore: () => undefined, // express-session MemoryStore
+    sessionStore(session) { memorySessions = memorySessions || new session.MemoryStore(); return memorySessions; },
     async init() { ensureDb(); },
     async close() {},
     async reset() { fs.rmSync(dbFile, { force: true }); lockouts.clear(); ensureDb(); },
@@ -88,6 +89,52 @@ function createJsonStore(dbFile) {
     async getDoctorAccountId(doctorId) {
       return read().users.find(user => user.role === "doctor" && user.doctorId === doctorId)?.id || null;
     },
+    // ---- email verification / password reset ----
+    async createAuthToken({ userId, purpose, hash, expiresAt }) {
+      const db = read();
+      db.authTokens = (db.authTokens || []).filter(t => !(t.userId === userId && t.purpose === purpose && !t.usedAt));
+      db.authTokens.push({ id: idFor(db.authTokens), userId, purpose, hash, expiresAt: new Date(expiresAt).toISOString(), createdAt: new Date().toISOString() });
+      write(db);
+    },
+    async consumeAuthToken(hash, purpose) {
+      const db = read();
+      const token = (db.authTokens || []).find(t => t.hash === hash && t.purpose === purpose && !t.usedAt && Date.parse(t.expiresAt) > Date.now());
+      if (!token) return null;
+      token.usedAt = new Date().toISOString();
+      write(db);
+      return { userId: token.userId };
+    },
+    async revokeAuthTokens(userId, purpose) {
+      const db = read();
+      db.authTokens = (db.authTokens || []).filter(t => !(t.userId === userId && t.purpose === purpose && !t.usedAt));
+      write(db);
+    },
+    async lastAuthTokenIssuedAt(userId, purpose) {
+      const times = (read().authTokens || []).filter(t => t.userId === userId && t.purpose === purpose).map(t => Date.parse(t.createdAt));
+      return times.length ? new Date(Math.max(...times)) : null;
+    },
+    async markEmailVerified(userId) {
+      const db = read();
+      const user = db.users.find(u => u.id === userId);
+      if (!user) return null;
+      if (!user.emailVerifiedAt) { user.emailVerifiedAt = new Date().toISOString(); write(db); }
+      return user;
+    },
+    async setUserPassword(userId, passwordHash) {
+      const db = read();
+      const user = db.users.find(u => u.id === userId);
+      if (!user) return null;
+      user.password = passwordHash;
+      write(db);
+      return user;
+    },
+    async destroyUserSessions(userId, exceptSid) {
+      if (!memorySessions) return;
+      const sessions = await new Promise((resolve, reject) => memorySessions.all((error, all) => (error ? reject(error) : resolve(all || {}))));
+      const doomed = Object.entries(sessions).filter(([sid, data]) => data && Number(data.userId) === userId && sid !== exceptSid).map(([sid]) => sid);
+      await Promise.all(doomed.map(sid => new Promise(resolve => memorySessions.destroy(sid, resolve))));
+    },
+
     async setUserRole(id, role) {
       const db = read();
       const user = db.users.find(u => u.id === id);
