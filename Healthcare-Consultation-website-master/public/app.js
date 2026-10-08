@@ -297,8 +297,8 @@ function renderDoctors() {
       ${doctor.phone ? `<p><a href="tel:${escapeHtml(doctor.phone.replace(/[^\d+(). -]/g, ""))}">${escapeHtml(doctor.phone)}</a></p>` : ""}
       ${doctor.mapURI ? `<a href="${escapeHtml(doctor.mapURI)}" target="_blank" rel="noopener noreferrer">View OpenStreetMap listing</a>` : ""}</div></article>`).join("")
     : '<p class="empty">No nearby doctors or dentists were found in OpenStreetMap for this distance. Try a wider radius or another specialty.</p>';
-  $("#doctors-map").hidden = !doctors.length;
-  if (doctors.length && currentPage === "doctors") createMap("doctors-map", doctors);
+  $("#doctors-map").hidden = false;
+  if (currentPage === "doctors") createMap("doctors-map", doctors);
 }
 function renderHospitals() {
   const grid = $("#hospital-grid");
@@ -322,8 +322,8 @@ function renderHospitals() {
       ${hospital.openingHours ? `<p>Hours listed: ${escapeHtml(hospital.openingHours)}</p>` : ""}
       ${hospital.mapURI ? `<a href="${escapeHtml(hospital.mapURI)}" target="_blank" rel="noopener noreferrer">View OpenStreetMap listing</a>` : ""}</div></article>`).join("")
     : '<p class="empty">No hospitals were found in OpenStreetMap for this distance. Try a wider distance or another location.</p>';
-  $("#hospital-map").hidden = !hospitals.length;
-  if (hospitals.length && currentPage === "hospitals") createMap("hospital-map", hospitals);
+  $("#hospital-map").hidden = false;
+  if (currentPage === "hospitals") createMap("hospital-map", hospitals);
 }
 function findMedicalStores() {
   if (!requireSignIn()) return;
@@ -736,9 +736,18 @@ function locationErrorMessage(error) {
 }
 function createMap(mapId = "clinic-map", providers = state.nearbyClinics) {
   const mapElement = $(`#${mapId}`);
+  if (!state.location || !mapElement) return;
   mapElement.hidden = false;
+  if (!window.L) {
+    mapElement.innerHTML = `<p class="empty">The interactive OpenStreetMap could not load. <a href="https://www.openstreetmap.org/?mlat=${encodeURIComponent(state.location.latitude)}&mlon=${encodeURIComponent(state.location.longitude)}#map=14/${encodeURIComponent(state.location.latitude)}/${encodeURIComponent(state.location.longitude)}" target="_blank" rel="noopener noreferrer">Open this location in OpenStreetMap</a>.</p>`;
+    return;
+  }
+  if (state.map && state.map.getContainer() !== mapElement) {
+    state.map.remove();
+    state.map = null;
+    state.markers = null;
+  }
   if (!state.map) {
-    if (!window.L) throw new Error("The OpenStreetMap map library could not load. Check your internet connection and refresh.");
     state.map = L.map(mapElement).setView([state.location.latitude, state.location.longitude], 13);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
@@ -758,7 +767,8 @@ function createMap(mapId = "clinic-map", providers = state.nearbyClinics) {
       .bindPopup(`<strong>${escapeHtml(index + 1)}. ${escapeHtml(provider.name || provider.doctor.name)}</strong><br>${escapeHtml(provider.doctor.specialty)}`)
       .addTo(state.markers);
   });
-  state.map.fitBounds(L.latLngBounds(locations).pad(0.12), { maxZoom: 14 });
+  if (locations.length > 1) state.map.fitBounds(L.latLngBounds(locations).pad(0.12), { maxZoom: 14 });
+  else state.map.setView(locations[0], 14);
   state.map.invalidateSize();
 }
 function renderNearbyClinics() {
@@ -783,7 +793,7 @@ function renderNearbyClinics() {
   if (!providers.length) {
     directory.innerHTML = `<p class="empty">No OpenStreetMap-listed providers were returned. Try refreshing your location.</p>${googleMapsFallback("hospitals doctors clinics dentists", "hospitals and doctors")}`;
     $("#nearby-controls").hidden = true;
-    $("#clinic-map").hidden = true;
+    createMap("clinic-map", []);
     return;
   }
   $("#nearby-controls").hidden = false;
@@ -802,7 +812,7 @@ function renderNearbyClinics() {
     directory.innerHTML = category === "pharmacy"
       ? `<p class="empty">No OpenStreetMap-listed medical stores were found. Try another type or share a different location.</p>${googleMapsFallback("pharmacies medical stores", "pharmacies and medical stores")}`
       : `<p class="empty">No OpenStreetMap-listed healthcare providers were found. Try another type or share a different location.</p>${googleMapsFallback("hospitals doctors clinics dentists", "hospitals and doctors")}`;
-    $("#clinic-map").hidden = true;
+    createMap("clinic-map", []);
     return;
   }
   const resultLabel = category === "pharmacy" ? "medical store" : category === "healthcare" ? "healthcare provider" : "provider";
@@ -825,7 +835,7 @@ function renderNearbyClinics() {
   document.querySelectorAll("[data-route-clinic]").forEach(button => button.addEventListener("click", () => showDrivingRoute(button.dataset.routeClinic, button)));
   document.querySelectorAll("#nearby-content [data-book]").forEach(button => button.addEventListener("click", () => openBooking(Number(button.dataset.book))));
   document.querySelectorAll("#nearby-content [data-request-provider]").forEach(button => button.addEventListener("click", () => openProviderAppointment(button.dataset.requestProvider)));
-  createMap();
+  createMap("clinic-map", state.nearbyClinics);
 }
 async function showDrivingRoute(clinicId, button) {
   const clinic = state.nearbyClinics.find(item => String(item.id) === String(clinicId));
