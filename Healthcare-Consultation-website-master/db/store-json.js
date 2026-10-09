@@ -533,6 +533,14 @@ function createJsonStore(dbFile) {
           return { ...withOrderEvents(order), customer: { name: user?.name || "", email: user?.email || "" } };
         });
     },
+    async listSalesSince(sinceIso) {
+      return read().orders
+        .filter(order => order.status !== "Cancelled" && Date.parse(order.createdAt) >= Date.parse(sinceIso))
+        .map(order => ({
+          createdAt: order.createdAt,
+          items: order.items.map(item => ({ productId: item.productId, quantity: item.quantity }))
+        }));
+    },
     async createOrder({ userId, items, total, status }) {
       const db = read();
       const order = { id: idFor(db.orders), userId, items, total, status, createdAt: new Date().toISOString() };

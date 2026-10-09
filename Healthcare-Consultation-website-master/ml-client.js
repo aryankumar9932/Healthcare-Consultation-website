@@ -41,5 +41,6 @@ async function post(path, body) {
 const specialty = (symptoms, available) =>
   post("/v1/specialty", { symptoms, available_specialties: available });
 const noShow = features => post("/v1/no-show", features);
+const demand = payload => post("/v1/demand", payload);
 
-module.exports = { specialty, noShow };
+module.exports = { specialty, noShow, demand };

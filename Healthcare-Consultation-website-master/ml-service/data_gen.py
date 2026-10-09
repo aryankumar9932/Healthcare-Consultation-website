@@ -87,3 +87,23 @@ def make_noshow_dataset(n=8000, seed=11):
         "fee": fee,
         "no_show": no_show,
     })
+
+
+def make_demand_series(n_products=60, days=540, seed=7):
+    """Synthetic daily unit sales with weekly patterns, trends and seasonality."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2024-01-01", periods=days)
+    months, weekdays = dates.month.values, dates.dayofweek.values
+    series = []
+    for _ in range(n_products):
+        base = rng.gamma(2.0, 3.0) + 0.5
+        weekly = rng.normal(1.0, 0.15, 7).clip(0.5, 1.5)
+        drift = rng.normal(0, 0.0008)
+        amplitude = rng.choice([0.0, 0.25, 0.5], p=[0.5, 0.3, 0.2])
+        peak_month = rng.integers(1, 13)
+        level = base * (1 + drift * np.arange(days)).clip(0.3)
+        seasonal = 1 + amplitude * np.cos(2 * np.pi * (months - peak_month) / 12)
+        mean = level * weekly[weekdays] * seasonal
+        mean *= np.where(rng.random(days) < 0.01, rng.uniform(1.5, 3.0, days), 1.0)
+        series.append(rng.poisson(mean))
+    return dates, np.array(series)

@@ -1114,6 +1114,48 @@ function createApp(options = {}) {
     res.status(202).json({ id });
   }));
 
+  // Admin-only pharmacy forecasting; the ML service falls back to a transparent sales average.
+  app.get("/api/admin/ml/demand", requireUser, requireAdmin, wrap(async (req, res) => {
+    const WINDOW = 56;
+    const anchor = new Date(Date.now() - 864e5); // yesterday: last fully completed clinic day
+    const since = new Date(anchor.getTime() - WINDOW * 864e5).toISOString();
+    const [products, sales] = await Promise.all([store.listProducts(), store.listSalesSince(since)]);
+    const dayKeys = Array.from({ length: WINDOW }, (_, index) =>
+      clinicDayKey(new Date(anchor.getTime() - (WINDOW - 1 - index) * 864e5)));
+    const dayIndex = new Map(dayKeys.map((key, index) => [key, index]));
+    const perProduct = new Map(products.map(product => [product.id, new Array(WINDOW).fill(0)]));
+    let firstSale = null;
+    for (const order of sales) {
+      const index = dayIndex.get(clinicDayKey(order.createdAt));
+      if (index === undefined) continue;
+      firstSale = firstSale === null ? index : Math.min(firstSale, index);
+      for (const item of order.items) {
+        const series = perProduct.get(item.productId);
+        if (series) series[index] += item.quantity;
+      }
+    }
+    const historyDays = firstSale === null ? 0 : WINDOW - firstSale;
+    const localDay = new Date(anchor.toLocaleString("en-US", { timeZone: CLINIC_TIMEZONE }));
+    const dow = (localDay.getDay() + 6) % 7;
+    const results = await Promise.all(products.map(async product => {
+      const series = perProduct.get(product.id);
+      const sold28 = series.slice(-28).reduce((sum, quantity) => sum + quantity, 0);
+      const ml = await mlService.demand({
+        daily_sales: series.slice(-Math.max(historyDays, 14)), dow, month: localDay.getMonth() + 1
+      });
+      const valid = ml && [ml.forecast, ml.low, ml.high].every(Number.isFinite);
+      const baseline = Math.round(sold28 / 28 * 7 * 10) / 10;
+      return {
+        productId: product.id, name: product.name, sold28,
+        forecast: valid ? ml.forecast : baseline,
+        low: valid ? ml.low : null,
+        high: valid ? ml.high : null,
+        source: valid ? "ml" : "baseline"
+      };
+    }));
+    res.json({ horizonDays: 7, historyDays, lowHistory: historyDays < 28, products: results.sort((a, b) => b.forecast - a.forecast) });
+  }));
+
   app.get("/api/orders", requireUser, wrap(async (req, res) => {
     res.json(await store.listOrdersForUser(req.user.id));
   }));

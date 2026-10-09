@@ -10,7 +10,7 @@ SERVICE_KEY = "test-only-ml-service-key"
 
 @pytest.fixture(scope="session", autouse=True)
 def trained():
-    if not (ROOT / "models" / "specialty.joblib").exists():
+    if not all((ROOT / "models" / name).exists() for name in ("specialty.joblib", "noshow.joblib", "demand.joblib")):
         import subprocess
 
         subprocess.check_call([sys.executable, "train.py"], cwd=ROOT)
@@ -83,3 +83,31 @@ def test_requires_service_key(client):
 def test_validation(client):
     response = client.post("/v1/no-show", json={"lead_days": -1})
     assert response.status_code == 422
+
+
+def test_demand_forecast(client):
+    sales = [10, 12, 9, 11, 14, 13, 10] * 4
+    response = client.post("/v1/demand", json={"daily_sales": sales, "dow": 6, "month": 3, "current_stock": 20})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["horizon_days"] == 7
+    assert 0 <= body["low"] <= body["forecast"] <= body["high"]
+    assert 50 < body["forecast"] < 110
+    assert isinstance(body["suggested_reorder"], int) and body["suggested_reorder"] >= 0
+    plenty = client.post("/v1/demand", json={"daily_sales": sales, "dow": 6, "month": 3, "current_stock": 100000}).json()
+    assert plenty["suggested_reorder"] == 0
+    assert body["low_history"] is False
+
+
+def test_demand_short_history_is_flagged(client):
+    response = client.post("/v1/demand", json={"daily_sales": [3, 4, 5, 4, 3, 5, 4, 4], "dow": 1, "month": 1})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["low_history"] is True and "suggested_reorder" not in body
+
+
+def test_demand_rejects_bad_input_and_missing_key(client):
+    assert client.post("/v1/demand", json={"daily_sales": [1, 2], "dow": 1, "month": 1}).status_code == 422
+    assert client.post("/v1/demand", json={"daily_sales": [1] * 10, "dow": 9, "month": 1}).status_code == 422
+    assert client.post("/v1/demand", json={"daily_sales": [1] * 10, "dow": 1, "month": 1},
+                       headers={"X-Service-Key": "wrong"}).status_code == 401

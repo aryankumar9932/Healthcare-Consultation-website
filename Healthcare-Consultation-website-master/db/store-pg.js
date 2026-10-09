@@ -478,6 +478,16 @@ function createPgStore(connectionString, options = {}) {
       return attachOrderEvents(rows.map(row => ({ id: row.id, userId: row.user_id, customer: { name: row.user_name, email: row.user_email },
         items: row.items.map(item => ({ ...item, price: num(item.price) })), total: num(row.total), status: row.status, createdAt: iso(row.created_at) })));
     },
+    async listSalesSince(sinceIso) {
+      const { rows } = await q(`SELECT o.id, o.created_at, i.product_id, i.quantity FROM orders o
+        JOIN order_items i ON i.order_id=o.id WHERE o.status <> 'Cancelled' AND o.created_at >= $1 ORDER BY o.id`, [sinceIso]);
+      const byOrder = new Map();
+      for (const row of rows) {
+        if (!byOrder.has(row.id)) byOrder.set(row.id, { createdAt: iso(row.created_at), items: [] });
+        byOrder.get(row.id).items.push({ productId: row.product_id, quantity: row.quantity });
+      }
+      return [...byOrder.values()];
+    },
     async createOrder({ userId, items, total, status }) {
       const client = await pool.connect();
       try {

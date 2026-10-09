@@ -76,7 +76,14 @@ async function signUp(base, name, email, password = "a-long-test-password") {
   await waitForMail(email, 1, "Confirm");
   return c;
 }
-const futureDate = () => new Date(Date.now() + 3 * 864e5).toISOString();
+// Dr. Halima (id 1) works Monday and Wednesday 10:00-17:00 in Asia/Kolkata.
+const futureDate = () => {
+  const IST_OFFSET_MS = 5.5 * 3600e3;
+  const day = new Date(Date.now() + 3 * 864e5);
+  while (![1, 3].includes(new Date(day.getTime() + IST_OFFSET_MS).getUTCDay())) day.setUTCDate(day.getUTCDate() + 1);
+  const ist = new Date(day.getTime() + IST_OFFSET_MS);
+  return new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), 5, 30)).toISOString(); // 11:00 IST
+};
 const order = { items: [{ productId: 2, quantity: 1 }] };
 
 let base;

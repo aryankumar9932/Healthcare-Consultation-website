@@ -258,6 +258,7 @@ async function saveUser(user) {
   await loadAppointments();
   await loadMyOrders();
   await loadAdminOrders();
+  await loadDemandForecast();
   if (user?.isAdmin) await loadManagedClinics();
   else clearManagedClinics();
   if (!user) openAuth();
@@ -566,6 +567,33 @@ async function loadAdminOrders() {
     $("#admin-order-list").innerHTML = orders.length ? orders.map(order => renderOrder(order, true)).join("") : `<p class="empty">${escapeHtml(i18n.t("orders.empty"))}</p>`;
   } catch (error) { showToast(error.message); }
 }
+async function loadDemandForecast() {
+  const section = $("#admin-demand");
+  if (!section) return;
+  section.hidden = !state.user?.isAdmin;
+  if (!state.user?.isAdmin) return;
+  try {
+    const data = await api("admin/ml/demand");
+    const usingMl = data.products.length > 0 && data.products.every(product => product.source === "ml");
+    const mixedSources = data.products.some(product => product.source === "ml") && !usingMl;
+    $("#demand-note").textContent =
+      (usingMl ? "Experimental forecast for the next 7 days (range = likely low to high)." : mixedSources ? "Some forecasts use the ML service; others use a simple average of the last 28 days." : "ML service unavailable: showing a simple average of the last 28 days.") +
+      (data.lowHistory ? ` Only ${data.historyDays} days of sales history so far; treat this as rough.` : "");
+    $("#demand-table").innerHTML = `<table class="data-table"><thead><tr><th>Medicine</th><th>Sold (28 days)</th><th>Next 7 days</th><th>Range</th><th>In stock</th><th>Suggested reorder</th></tr></thead><tbody>
+      ${data.products.map(product => `<tr data-high="${Number(product.high ?? product.forecast)}"><td>${escapeHtml(product.name)}</td><td>${Number(product.sold28)}</td>
+        <td><strong>${Math.round(Number(product.forecast))}</strong></td><td>${product.low === null ? "—" : `${Math.round(Number(product.low))}–${Math.round(Number(product.high))}`}</td>
+        <td><input type="number" min="0" data-stock class="demand-stock" aria-label="Current stock for ${escapeHtml(product.name)}"></td><td data-reorder>—</td></tr>`).join("")}</tbody></table>`;
+  } catch (error) { showToast(error.message); }
+}
+$("#demand-refresh").addEventListener("click", loadDemandForecast);
+$("#demand-table").addEventListener("input", event => {
+  const input = event.target.closest("[data-stock]");
+  if (!input) return;
+  const row = input.closest("tr");
+  const stock = Number(input.value);
+  row.querySelector("[data-reorder]").textContent = input.value === "" || !(stock >= 0)
+    ? "—" : String(Math.max(0, Math.ceil(Number(row.dataset.high) - stock)));
+});
 $("#admin-order-filter").addEventListener("change", loadAdminOrders);
 $("#admin-order-list").addEventListener("click", async event => {
   const button = event.target.closest("[data-order-status]");

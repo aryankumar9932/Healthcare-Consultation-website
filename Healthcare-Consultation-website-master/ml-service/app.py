@@ -9,9 +9,11 @@ import re
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
+from features import demand_features
 
 MODELS = Path(__file__).parent / "models"
 API_KEY = os.environ.get("ML_SERVICE_KEY", "")
@@ -29,6 +31,13 @@ def _load():
         }
         _state.update(models)
     return _state
+
+
+def _load_demand():
+    # Keep existing endpoints available when an older deployment lacks demand.joblib.
+    if "demand" not in _state:
+        _state["demand"] = joblib.load(MODELS / "demand.joblib")
+    return _state["demand"]
 
 
 RED_FLAGS = [
@@ -62,6 +71,13 @@ class NoShowIn(BaseModel):
     age: int = Field(ge=0, le=120, default=40)
     reminder: int = Field(ge=0, le=1, default=1)
     fee: int = Field(ge=0, le=100000, default=450)
+
+
+class DemandIn(BaseModel):
+    daily_sales: list[int] = Field(min_length=7, max_length=120)
+    dow: int = Field(ge=0, le=6)
+    month: int = Field(ge=1, le=12)
+    current_stock: int | None = Field(default=None, ge=0, le=1_000_000)
 
 
 @app.get("/health")
@@ -121,3 +137,30 @@ def no_show(body: NoShowIn, x_service_key: str = Header(default="")):
         "suggested_action": "send an extra reminder" if risk != "low" else None,
         "disclaimer": "Synthetic experimental estimate only; never use it to deny or delay care.",
     }
+
+
+@app.post("/v1/demand")
+def demand(body: DemandIn, x_service_key: str = Header(default="")):
+    auth(x_service_key)
+    if any(value < 0 or value > 100_000 for value in body.daily_sales):
+        raise HTTPException(422, "daily_sales values must be between 0 and 100000")
+    try:
+        bundle = _load_demand()
+    except Exception as error:  # pragma: no cover
+        logging.exception("CareConnect demand model failed to load")
+        raise HTTPException(503, "Demand model is unavailable") from error
+    row = pd.DataFrame([demand_features(body.daily_sales, body.dow, body.month)])[bundle["features"]]
+    low, mid, high = sorted(float(bundle["models"][q].predict(row)[0]) for q in (0.1, 0.5, 0.9))
+    low, mid, high = (max(0.0, value) for value in (low, mid, high))
+    result = {
+        "horizon_days": bundle["horizon"],
+        "forecast": round(mid, 1),
+        "low": round(low, 1),
+        "high": round(high, 1),
+        "low_history": len(body.daily_sales) < 28,
+        "model_version": "hgb-quantile-1",
+        "disclaimer": "Synthetic experimental forecast; check against real stock and supplier lead times.",
+    }
+    if body.current_stock is not None:
+        result["suggested_reorder"] = int(max(0, np.ceil(high - body.current_stock)))
+    return result
