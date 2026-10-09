@@ -37,12 +37,19 @@ const mapAppointment = r => r && ({
   date: iso(r.scheduled_for), notes: r.notes, symptoms: r.symptoms || "",
   consultationNotes: r.consultation_notes || "", completedAt: iso(r.completed_at),
   status: r.status, createdAt: iso(r.created_at), cancelledAt: iso(r.cancelled_at),
-  paymentStatus: r.payment_status, paymentOrderId: r.payment_order_id
+  paymentStatus: r.payment_status, paymentOrderId: r.payment_order_id,
+  refundStatus: r.refund_status, refundAmount: r.refund_amount
 });
 
 function createPgStore(connectionString, options = {}) {
   const pool = new Pool({ connectionString, max: Number(process.env.PG_POOL_MAX || 10), ssl: options.ssl });
   const q = (text, params) => pool.query(text, params);
+  const attachOrderEvents = async orders => {
+    if (!orders.length) return orders;
+    const { rows } = await q("SELECT order_id, status, note, created_at FROM order_events WHERE order_id = ANY($1) ORDER BY created_at, id", [orders.map(order => order.id)]);
+    return orders.map(order => ({ ...order, events: [{ status: "Processing", note: "", at: order.createdAt },
+      ...rows.filter(row => row.order_id === order.id).map(row => ({ status: row.status, note: row.note, at: iso(row.created_at) }))] }));
+  };
 
   async function seedCatalogue() {
     const client = await pool.connect();
@@ -276,6 +283,26 @@ function createPgStore(connectionString, options = {}) {
       const { rows } = await q("UPDATE appointments SET payment_status='paid', payment_id=$2 WHERE payment_order_id=$1 RETURNING *", [orderId, paymentId]);
       return mapAppointment(rows[0]) || null;
     },
+    async getAppointmentById(id) {
+      const { rows } = await q("SELECT * FROM appointments WHERE id=$1", [id]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async beginRefund(appointmentId) {
+      const { rows } = await q(`UPDATE appointments SET refund_status='pending'
+        WHERE id=$1 AND payment_status='paid' AND (refund_status IS NULL OR refund_status='failed') RETURNING *`, [appointmentId]);
+      return rows[0] ? { ...mapAppointment(rows[0]), paymentId: rows[0].payment_id } : null;
+    },
+    async completeRefund(appointmentId, refundId, amount) {
+      const { rows } = await q(`UPDATE appointments SET
+          refund_status=CASE WHEN $3::int > 0 THEN 'refunded' ELSE 'none' END,
+          refund_id=$2, refund_amount=$3::int, refunded_at=now(),
+          payment_status=CASE WHEN $3::int > 0 THEN 'refunded' ELSE payment_status END
+        WHERE id=$1 RETURNING *`, [appointmentId, refundId, amount]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async failRefund(appointmentId) {
+      await q("UPDATE appointments SET refund_status='failed' WHERE id=$1 AND refund_status='pending'", [appointmentId]);
+    },
     async createNotification({ userId, type, message, link }) {
       const { rows } = await q(`INSERT INTO notifications (user_id, type, message, link) VALUES ($1,$2,$3,$4) RETURNING *`,
         [userId, type, message, link || "/appointments"]);
@@ -421,8 +448,35 @@ function createPgStore(connectionString, options = {}) {
       const { rows } = await q(`SELECT o.*, COALESCE(json_agg(json_build_object('productId', i.product_id, 'name', i.name,
           'quantity', i.quantity, 'price', i.price) ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '[]') AS items
         FROM orders o LEFT JOIN order_items i ON i.order_id=o.id WHERE o.user_id=$1 GROUP BY o.id ORDER BY o.id`, [userId]);
-      return rows.map(r => ({ id: r.id, userId: r.user_id, items: r.items.map(i => ({ ...i, price: num(i.price) })),
-        total: num(r.total), status: r.status, createdAt: iso(r.created_at) }));
+      return attachOrderEvents(rows.map(r => ({ id: r.id, userId: r.user_id, items: r.items.map(i => ({ ...i, price: num(i.price) })),
+        total: num(r.total), status: r.status, createdAt: iso(r.created_at) })));
+    },
+    async getOrderById(id) {
+      const { rows } = await q("SELECT id, user_id, status FROM orders WHERE id=$1", [id]);
+      return rows[0] ? { id: rows[0].id, userId: rows[0].user_id, status: rows[0].status } : null;
+    },
+    async updateOrderStatus(orderId, expectedStatus, status, note = "") {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const { rows } = await client.query("UPDATE orders SET status=$3 WHERE id=$1 AND status=$2 RETURNING id, user_id", [orderId, expectedStatus, status]);
+        if (!rows[0]) { await client.query("ROLLBACK"); return null; }
+        await client.query("INSERT INTO order_events (order_id, status, note) VALUES ($1,$2,$3)", [orderId, status, note]);
+        await client.query("COMMIT");
+        return { id: rows[0].id, userId: rows[0].user_id, status };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    },
+    async listAllOrders({ status = null, limit = 100 } = {}) {
+      const { rows } = await q(`SELECT o.*, u.name AS user_name, u.email AS user_email,
+          COALESCE(json_agg(json_build_object('productId', i.product_id, 'name', i.name, 'quantity', i.quantity, 'price', i.price) ORDER BY i.id)
+            FILTER (WHERE i.id IS NOT NULL), '[]') AS items
+        FROM orders o JOIN users u ON u.id=o.user_id LEFT JOIN order_items i ON i.order_id=o.id
+        WHERE ($1::text IS NULL OR o.status=$1) GROUP BY o.id, u.name, u.email ORDER BY o.id DESC LIMIT $2`, [status, limit]);
+      return attachOrderEvents(rows.map(row => ({ id: row.id, userId: row.user_id, customer: { name: row.user_name, email: row.user_email },
+        items: row.items.map(item => ({ ...item, price: num(item.price) })), total: num(row.total), status: row.status, createdAt: iso(row.created_at) })));
     },
     async createOrder({ userId, items, total, status }) {
       const client = await pool.connect();

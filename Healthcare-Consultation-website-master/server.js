@@ -143,6 +143,52 @@ const RZP_KEY_ID = process.env.RAZORPAY_KEY_ID || "";
 const RZP_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "";
 const PAYMENT_CURRENCY = process.env.PAYMENT_CURRENCY || "INR";
 const safeEqual = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
+const refundHoursSetting = Number(process.env.REFUND_FULL_HOURS ?? 24);
+const refundPercentSetting = Number(process.env.REFUND_PARTIAL_PERCENT ?? 50);
+const REFUND_FULL_HOURS = Number.isFinite(refundHoursSetting) && refundHoursSetting >= 0 ? refundHoursSetting : 24;
+const REFUND_PARTIAL_PERCENT = Number.isFinite(refundPercentSetting) ? Math.min(100, Math.max(0, refundPercentSetting)) : 50;
+const ORDER_FLOW = { Processing: ["Packed", "Cancelled"], Packed: ["Shipped", "Cancelled"], Shipped: ["Delivered"], Delivered: [], Cancelled: [] };
+
+async function rzp(method, apiPath, body) {
+  const response = await fetch(`https://api.razorpay.com/v1${apiPath}`, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${RZP_KEY_ID}:${RZP_KEY_SECRET}`).toString("base64")}` },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error?.description || `Razorpay request failed (${response.status})`);
+  return data;
+}
+
+const refundFraction = (appointmentIso, atMs = Date.now()) =>
+  (Date.parse(appointmentIso) - atMs) / 3600000 >= REFUND_FULL_HOURS ? 1 : REFUND_PARTIAL_PERCENT / 100;
+
+async function issueRefund(appointment, atMs = Date.now()) {
+  const claimed = await store.beginRefund(appointment.id);
+  if (!claimed) return { status: "skipped" };
+  try {
+    if (!RZP_KEY_ID || !RZP_KEY_SECRET) throw new Error("Razorpay refund credentials are not configured.");
+    const payment = await rzp("GET", `/payments/${claimed.paymentId}`);
+    if (payment.status !== "captured") throw new Error(`Payment is "${payment.status}", not captured.`);
+    const refundable = payment.amount - (payment.amount_refunded || 0);
+    const amount = Math.floor(refundable * refundFraction(appointment.date, atMs));
+    if (amount < 100) {
+      await store.completeRefund(appointment.id, null, 0);
+      return { status: "none" };
+    }
+    const refund = await rzp("POST", `/payments/${claimed.paymentId}/refund`, {
+      amount, speed: "normal", receipt: `refund_appt_${appointment.id}`,
+      notes: { appointmentId: String(appointment.id), reason: "Appointment cancelled" }
+    });
+    await store.completeRefund(appointment.id, refund.id, refund.amount);
+    return { status: "refunded", amount: refund.amount, currency: refund.currency };
+  } catch (error) {
+    console.error("Refund failed:", error.message);
+    await store.failRefund(appointment.id);
+    return { status: "failed" };
+  }
+}
 
 function startReminderJob({ intervalMs = 5 * 60 * 1000 } = {}) {
   const HOUR = 3600000;
@@ -718,13 +764,20 @@ function createApp(options = {}) {
     const appointment = id ? await store.getAppointmentForPatient(id, req.user.id) : null;
     if (!appointment) return res.status(404).json({ error: "Appointment not found." });
     if (!CHANGEABLE.includes(appointment.status)) return res.status(409).json({ error: "This appointment can no longer be cancelled." });
-    if (appointment.paymentStatus === "paid") return res.status(409).json({ error: "This appointment is paid. Please contact support to cancel and request a refund." });
     if (Date.parse(appointment.date) - Date.now() < MIN_NOTICE_MS) return res.status(409).json({ error: "Appointments cannot be cancelled within 2 hours of the start time." });
     const updated = await store.cancelAppointment(id, req.user.id, appointment.status);
     if (!updated) return res.status(409).json({ error: "The appointment changed. Refresh and try again." });
     if (appointment.doctorId) await notify(await store.getDoctorAccountId(appointment.doctorId), "appointment_cancelled",
       `${req.user.name} cancelled the appointment on ${new Date(appointment.date).toLocaleString("en-IN", { timeZone: CLINIC_TIMEZONE })}.`, "/doctor");
-    res.json(updated);
+    const refund = appointment.paymentStatus === "paid" ? await issueRefund(appointment) : null;
+    res.json({ ...updated, refund });
+  }));
+  app.post("/api/admin/appointments/:id/refund", requireUser, requireAdmin, wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    const appointment = id ? await store.getAppointmentById(id) : null;
+    if (!appointment) return res.status(404).json({ error: "Appointment not found." });
+    if (appointment.status !== "Cancelled") return res.status(409).json({ error: "Only cancelled appointments can be refunded." });
+    res.json({ refund: await issueRefund(appointment, Date.parse(appointment.cancelledAt) || Date.now()) });
   }));
   app.post("/api/appointments/:id/reschedule", requireUser, requirePatient, requireVerifiedEmail, wrap(async (req, res) => {
     const id = parseId(req.params.id);
@@ -1063,6 +1116,36 @@ function createApp(options = {}) {
 
   app.get("/api/orders", requireUser, wrap(async (req, res) => {
     res.json(await store.listOrdersForUser(req.user.id));
+  }));
+  app.get("/api/admin/orders", requireUser, requireAdmin, wrap(async (req, res) => {
+    const status = req.query.status ? String(req.query.status) : null;
+    if (status && !Object.hasOwn(ORDER_FLOW, status)) return res.status(400).json({ error: "Unknown order status." });
+    res.json(await store.listAllOrders({ status }));
+  }));
+  app.post("/api/admin/orders/:id/status", requireUser, requireAdmin, wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    const status = String((req.body || {}).status || "");
+    const note = String((req.body || {}).note || "").trim().slice(0, 200);
+    const order = id ? await store.getOrderById(id) : null;
+    if (!order) return res.status(404).json({ error: "Order not found." });
+    if (!(ORDER_FLOW[order.status] || []).includes(status)) return res.status(409).json({ error: `An order cannot move from ${order.status} to ${status}.` });
+    const updated = await store.updateOrderStatus(id, order.status, status, note);
+    if (!updated) return res.status(409).json({ error: "The order changed. Refresh and try again." });
+    const customer = await store.getUserById(order.userId);
+    if (customer?.email) mailer.send({
+      to: customer.email, subject: `Your medicine order #${id}: ${status}`,
+      text: `Hello ${customer.name},\n\nYour medicine order #${id} is now: ${status}.${note ? `\nNote: ${note}` : ""}\n\nYou can follow it under Pharmacy → My orders.`
+    }).catch(error => console.error("Order email failed:", error.message));
+    res.json(updated);
+  }));
+  app.post("/api/orders/:id/cancel", requireUser, wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    const order = id ? await store.getOrderById(id) : null;
+    if (!order || order.userId !== req.user.id) return res.status(404).json({ error: "Order not found." });
+    if (order.status !== "Processing") return res.status(409).json({ error: "Only orders that are still processing can be cancelled." });
+    const updated = await store.updateOrderStatus(id, "Processing", "Cancelled", "Cancelled by customer");
+    if (!updated) return res.status(409).json({ error: "The order changed. Refresh and try again." });
+    res.json(updated);
   }));
 
   app.post("/api/orders", requireUser, requireVerifiedEmail, wrap(async (req, res) => {

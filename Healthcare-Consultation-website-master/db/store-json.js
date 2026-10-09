@@ -35,6 +35,7 @@ function createJsonStore(dbFile) {
     const doctor = doctors.find(d => d.id === clinic.doctorId);
     return doctor ? { ...clinic, doctor } : null;
   };
+  const withOrderEvents = order => ({ ...order, events: [{ status: "Processing", note: "", at: order.createdAt || null }, ...(order.events || [])] });
 
   return {
     driver: "json",
@@ -211,6 +212,32 @@ function createJsonStore(dbFile) {
     },
     async getAppointmentForPatient(appointmentId, userId) {
       return read().appointments.find(a => a.id === appointmentId && a.userId === userId) || null;
+    },
+    async getAppointmentById(id) { return read().appointments.find(appointment => appointment.id === id) || null; },
+    async beginRefund(appointmentId) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId);
+      if (!appointment || appointment.paymentStatus !== "paid" || !(appointment.refundStatus == null || appointment.refundStatus === "failed")) return null;
+      appointment.refundStatus = "pending";
+      write(db);
+      return appointment;
+    },
+    async completeRefund(appointmentId, refundId, amount) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId);
+      if (!appointment) return null;
+      appointment.refundStatus = amount > 0 ? "refunded" : "none";
+      appointment.refundId = refundId;
+      appointment.refundAmount = amount;
+      appointment.refundedAt = new Date().toISOString();
+      if (amount > 0) appointment.paymentStatus = "refunded";
+      write(db);
+      return appointment;
+    },
+    async failRefund(appointmentId) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId);
+      if (appointment && appointment.refundStatus === "pending") { appointment.refundStatus = "failed"; write(db); }
     },
     async cancelAppointment(appointmentId, userId, expectedStatus) {
       const db = read();
@@ -484,7 +511,28 @@ function createJsonStore(dbFile) {
       return doctor;
     },
 
-    async listOrdersForUser(userId) { return read().orders.filter(o => o.userId === userId); },
+    async listOrdersForUser(userId) { return read().orders.filter(o => o.userId === userId).map(withOrderEvents); },
+    async getOrderById(id) {
+      const order = read().orders.find(item => item.id === id);
+      return order ? { id: order.id, userId: order.userId, status: order.status } : null;
+    },
+    async updateOrderStatus(orderId, expectedStatus, status, note = "") {
+      const db = read();
+      const order = db.orders.find(item => item.id === orderId);
+      if (!order || order.status !== expectedStatus) return null;
+      order.status = status;
+      (order.events ||= []).push({ status, note, at: new Date().toISOString() });
+      write(db);
+      return { id: order.id, userId: order.userId, status };
+    },
+    async listAllOrders({ status = null, limit = 100 } = {}) {
+      const db = read();
+      return db.orders.filter(order => !status || order.status === status).sort((a, b) => b.id - a.id).slice(0, limit)
+        .map(order => {
+          const user = db.users.find(item => item.id === order.userId);
+          return { ...withOrderEvents(order), customer: { name: user?.name || "", email: user?.email || "" } };
+        });
+    },
     async createOrder({ userId, items, total, status }) {
       const db = read();
       const order = { id: idFor(db.orders), userId, items, total, status, createdAt: new Date().toISOString() };

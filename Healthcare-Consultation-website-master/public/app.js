@@ -256,14 +256,16 @@ async function saveUser(user) {
   state.user = user;
   renderHeader();
   await loadAppointments();
+  await loadMyOrders();
+  await loadAdminOrders();
   if (user?.isAdmin) await loadManagedClinics();
   else clearManagedClinics();
   if (!user) openAuth();
 }
 function renderHeader() {
   document.body.classList.toggle("auth-required", !state.user);
-  $("#user-label").textContent = state.user ? `Hi, ${state.user.name.split(" ")[0]}` : "";
-  $("#auth-button").textContent = state.user ? "Sign out" : "Sign in";
+  $("#user-label").textContent = state.user ? i18n.t("header.hi", { name: state.user.name.split(" ")[0] }) : "";
+  $("#auth-button").textContent = state.user ? i18n.t("header.signout") : i18n.t("header.signin");
   $("#password-button").hidden = !state.user;
   const unconfirmed = Boolean(state.user && state.user.emailVerified === false && state.user.emailVerificationRequired);
   $("#verify-banner").hidden = !unconfirmed;
@@ -273,6 +275,7 @@ function renderHeader() {
   $("#doctor-nav").hidden = state.user?.role !== "doctor";
   $("#admin-clinics").hidden = !state.user?.isAdmin;
   $("#admin-bootstrap-section").hidden = !state.user?.canBootstrapAdmin;
+  i18n.apply();
   refreshNotifications();
 }
 async function refreshNotifications() {
@@ -482,7 +485,9 @@ async function loadAppointments() {
         <input name="comment" maxlength="1000" placeholder="Optional comment"><button class="button button-outline" type="submit">Submit review</button></form>` : ""}
       ${appointment.doctorId && ["Pending", "Accepted"].includes(appointment.status) && appointment.paymentStatus !== "paid" ? `<button class="button button-primary" type="button" data-pay-appointment="${appointment.id}">Pay consultation fee</button>` : ""}
       ${appointment.paymentStatus === "paid" ? '<span class="status">Paid</span>' : ""}
-      </div><span class="status">${escapeHtml(appointment.status)}</span></div>`).join("") :
+      ${appointment.refundStatus === "refunded" ? `<p>${escapeHtml(i18n.t("refund.label"))}: ${(Number(appointment.refundAmount || 0) / 100).toFixed(2)} INR</p>` : ""}
+      ${appointment.refundStatus === "failed" ? `<p>${escapeHtml(i18n.t("refund.failed"))}</p>` : ""}
+      </div><span class="status">${escapeHtml(i18n.tStatus(appointment.status))}</span></div>`).join("") :
       '<p class="empty">You have no appointments yet. Choose a specialist above to get started.</p>';
     renderAppointmentSuggestions();
     await loadPatientWorkspace();
@@ -491,9 +496,15 @@ async function loadAppointments() {
     });
     $("#appointment-list").querySelectorAll("[data-cancel-appointment]").forEach(button => {
       button.addEventListener("click", async () => {
-        if (!confirm("Cancel this appointment?")) return;
+        if (!confirm(i18n.t("cancel.confirm"))) return;
         button.disabled = true;
-        try { await api(`appointments/${button.dataset.cancelAppointment}/cancel`, { method: "POST" }); showToast("Appointment cancelled."); await loadAppointments(); }
+        try {
+          const result = await api(`appointments/${button.dataset.cancelAppointment}/cancel`, { method: "POST" });
+          if (result.refund?.status === "refunded") showToast(i18n.t("refund.done", { amount: (result.refund.amount / 100).toFixed(2), currency: result.refund.currency || "INR" }));
+          else if (result.refund?.status === "failed") showToast(i18n.t("refund.failed"));
+          else showToast(i18n.t("cancel.done"));
+          await loadAppointments();
+        }
         catch (error) { showToast(error.message); button.disabled = false; }
       });
     });
@@ -524,6 +535,55 @@ async function loadAppointments() {
     showToast(error.message);
   }
 }
+const ORDER_STEPS = ["Processing", "Packed", "Shipped", "Delivered"];
+const ORDER_NEXT = { Processing: ["Packed", "Cancelled"], Packed: ["Shipped", "Cancelled"], Shipped: ["Delivered"], Delivered: [], Cancelled: [] };
+function renderOrder(order, admin = false) {
+  const step = ORDER_STEPS.indexOf(order.status);
+  const progress = step < 0 ? `<strong class="order-cancelled">${escapeHtml(i18n.tStatus(order.status))}</strong>` : `<ol class="order-steps">${ORDER_STEPS.map((status, index) => `<li class="${index <= step ? "is-done" : ""}"><span>${index + 1}</span>${escapeHtml(i18n.tStatus(status))}</li>`).join("")}</ol>`;
+  const items = (order.items || []).map(item => `<li>${escapeHtml(item.name)} × ${Number(item.quantity)}</li>`).join("");
+  const events = (order.events || []).map(event => `<li><strong>${escapeHtml(i18n.tStatus(event.status))}</strong>${event.note ? ` · ${escapeHtml(event.note)}` : ""}<small>${escapeHtml(new Date(event.at || event.createdAt).toLocaleString())}</small></li>`).join("");
+  const actions = admin ? (ORDER_NEXT[order.status] || []).map(status => `<button class="button button-outline" data-order-status="${escapeHtml(status)}" data-order-id="${order.id}">${escapeHtml(i18n.t("orders.mark", { status: i18n.tStatus(status) }))}</button>`).join("") : order.status === "Processing" ? `<button class="button button-outline" data-cancel-order="${order.id}">${escapeHtml(i18n.t("orders.cancel"))}</button>` : "";
+  return `<article class="order-card"><div class="order-card-heading"><div><h3>#${order.id} · ${escapeHtml(new Date(order.createdAt).toLocaleDateString())}</h3>${admin ? `<p>${escapeHtml(order.customer?.name || "")} · ${escapeHtml(order.customer?.email || "")}</p>` : ""}</div><strong>${escapeHtml(i18n.t("orders.total"))}: $${Number(order.total).toFixed(2)}</strong></div>${progress}<ul class="order-items">${items}</ul><details class="order-history"><summary>${escapeHtml(i18n.t("orders.history"))}</summary><ol>${events}</ol></details><div class="order-actions">${admin && actions ? `<label>${escapeHtml(i18n.t("orders.note"))}<input data-order-note="${order.id}" maxlength="200" placeholder="Tracking number or update"></label>` : ""}${actions}</div></article>`;
+}
+async function loadMyOrders() {
+  const section = $("#my-orders");
+  if (!section) return;
+  section.hidden = !state.user || state.user.role === "doctor" || state.user.role === "admin";
+  if (section.hidden) return;
+  try {
+    const orders = await api("orders");
+    $("#order-list").innerHTML = orders.length ? orders.map(order => renderOrder(order)).join("") : `<p class="empty">${escapeHtml(i18n.t("orders.empty"))}</p>`;
+  } catch (error) { showToast(error.message); }
+}
+async function loadAdminOrders() {
+  const section = $("#admin-orders");
+  if (!section) return;
+  section.hidden = !state.user?.isAdmin;
+  if (section.hidden) return;
+  try {
+    const status = $("#admin-order-filter").value;
+    const orders = await api(`admin/orders${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+    $("#admin-order-list").innerHTML = orders.length ? orders.map(order => renderOrder(order, true)).join("") : `<p class="empty">${escapeHtml(i18n.t("orders.empty"))}</p>`;
+  } catch (error) { showToast(error.message); }
+}
+$("#admin-order-filter").addEventListener("change", loadAdminOrders);
+$("#admin-order-list").addEventListener("click", async event => {
+  const button = event.target.closest("[data-order-status]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const note = $(`[data-order-note="${button.dataset.orderId}"]`)?.value || "";
+    await api(`admin/orders/${button.dataset.orderId}/status`, { method: "POST", body: JSON.stringify({ status: button.dataset.orderStatus, note }) });
+    await loadAdminOrders();
+  } catch (error) { showToast(error.message); button.disabled = false; }
+});
+$("#order-list").addEventListener("click", async event => {
+  const button = event.target.closest("[data-cancel-order]");
+  if (!button || !confirm(i18n.t("orders.cancelConfirm"))) return;
+  button.disabled = true;
+  try { await api(`orders/${button.dataset.cancelOrder}/cancel`, { method: "POST" }); await loadMyOrders(); }
+  catch (error) { showToast(error.message); button.disabled = false; }
+});
 async function payForAppointment(id) {
   try {
     const order = await api(`appointments/${id}/pay/order`, { method: "POST" });
@@ -716,6 +776,7 @@ function renderCart() {
       saveCart();
       $("#cart-dialog").close();
       showToast("Order placed successfully.");
+      await loadMyOrders();
     } catch (error) {
       showToast(error.message);
     }
@@ -1560,6 +1621,16 @@ $("#location-search-form").addEventListener("submit", async event => {
   }
 });
 $("#clear-location-button").addEventListener("click", clearLocation);
+document.addEventListener("languagechange", () => {
+  renderHeader();
+  renderDepartments();
+  renderDoctors();
+  renderHospitals();
+  renderProducts();
+  loadAppointments();
+  loadMyOrders();
+  loadAdminOrders();
+});
 (async function init() {
   try {
     [state.departments, state.doctors, state.products, state.clinics] = await Promise.all([
