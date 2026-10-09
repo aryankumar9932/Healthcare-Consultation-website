@@ -161,9 +161,12 @@ function startReminderJob({ intervalMs = 5 * 60 * 1000 } = {}) {
       }
     }
   }
-  const timer = setInterval(() => tick().catch(error => console.error("Reminder job failed:", error.message)), intervalMs);
+  const run = () => tick().catch(error => console.error("Reminder job failed:", error.message));
+  const timer = setInterval(run, intervalMs);
+  const first = setTimeout(run, 10 * 1000); // also check shortly after startup
   timer.unref();
-  return () => clearInterval(timer);
+  first.unref();
+  return () => { clearInterval(timer); clearTimeout(first); };
 }
 
 function isAdmin(user) {
