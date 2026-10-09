@@ -1086,7 +1086,6 @@ function createApp(options = {}) {
     }
   });
 
-  app.use("/admin/Res_img", express.static(path.join(root, "admin", "Res_img"), { fallthrough: false, index: false }));
   app.use(express.static(publicDir, { index: "index.html" }));
   app.get(["/dashboard", "/doctors", "/hospitals", "/nearby", "/ai-tools", "/ml-service", "/pharmacy", "/appointments", "/doctor"], (req, res) => {
     res.sendFile(path.join(publicDir, "index.html"));

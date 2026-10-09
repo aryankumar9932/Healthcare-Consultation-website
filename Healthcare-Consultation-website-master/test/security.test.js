@@ -69,7 +69,8 @@ test("sets hardened security headers and a strict content-security policy", asyn
   assert.ok(!csp.includes("unsafe-inline"));
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("x-powered-by"), null);
-  assert.ok(response.headers.get("permissions-policy").includes("camera=()"));
+  assert.ok(response.headers.get("permissions-policy").includes("camera=(self)"));
+  assert.ok(response.headers.get("permissions-policy").includes("microphone=(self)"));
 });
 
 test("rejects state-changing requests without a valid CSRF token", async () => {

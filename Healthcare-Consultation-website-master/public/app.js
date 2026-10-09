@@ -70,7 +70,7 @@ const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, character =>
 const assetPath = (item, type) => {
   const file = String(item.image || "").split("/").pop();
   const directory = type === "doctor" ? "doc" : type === "product" ? "dishes" : "dep";
-  return `/admin/Res_img/${directory}/${encodeURIComponent(file)}`;
+  return `/clinic-images/${directory}/${encodeURIComponent(file)}`;
 };
 let csrfToken = null;
 const loadCsrfToken = async () => {
