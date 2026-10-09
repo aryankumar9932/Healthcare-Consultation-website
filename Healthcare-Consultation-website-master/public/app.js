@@ -442,6 +442,15 @@ async function loadAppointments() {
       ${appointment.consultationNotes ? `<p><strong>Doctor's consultation notes:</strong> ${escapeHtml(appointment.consultationNotes)}</p>` : ""}
       ${appointment.providerSource === "openstreetmap" ? '<p class="appointment-unconfirmed-note">Saved in your CareConnect list only. This request was not sent to the provider; contact them directly to confirm.</p>' : ""}
       ${appointment.status === "Accepted" && appointment.doctorId ? `<button class="button button-primary" type="button" data-video-appointment="${appointment.id}">Join video consultation</button>` : ""}
+      ${["Pending", "Accepted", "Request saved · unconfirmed"].includes(appointment.status) ? `<div class="appointment-actions">
+        <button class="button button-outline" type="button" data-cancel-appointment="${appointment.id}">Cancel</button>
+        <details><summary>Reschedule</summary><form data-reschedule="${appointment.id}"><label>New date and time<input type="datetime-local" name="date" required></label><button class="button button-outline" type="submit">Save new time</button></form></details>
+      </div>` : ""}
+      ${appointment.status === "Completed" && appointment.doctorId && !appointment.reviewed ? `<form class="appointment-review" data-review="${appointment.id}"><strong>Rate your visit</strong>
+        <label>Rating<select name="rating" required><option value="5">★★★★★</option><option value="4">★★★★</option><option value="3">★★★</option><option value="2">★★</option><option value="1">★</option></select></label>
+        <input name="comment" maxlength="1000" placeholder="Optional comment"><button class="button button-outline" type="submit">Submit review</button></form>` : ""}
+      ${appointment.doctorId && ["Pending", "Accepted"].includes(appointment.status) && appointment.paymentStatus !== "paid" ? `<button class="button button-primary" type="button" data-pay-appointment="${appointment.id}">Pay consultation fee</button>` : ""}
+      ${appointment.paymentStatus === "paid" ? '<span class="status">Paid</span>' : ""}
       </div><span class="status">${escapeHtml(appointment.status)}</span></div>`).join("") :
       '<p class="empty">You have no appointments yet. Choose a specialist above to get started.</p>';
     renderAppointmentSuggestions();
@@ -449,9 +458,65 @@ async function loadAppointments() {
     $("#appointment-list").querySelectorAll("[data-video-appointment]").forEach(button => {
       button.addEventListener("click", () => startVideoCall(Number(button.dataset.videoAppointment), false));
     });
+    $("#appointment-list").querySelectorAll("[data-cancel-appointment]").forEach(button => {
+      button.addEventListener("click", async () => {
+        if (!confirm("Cancel this appointment?")) return;
+        button.disabled = true;
+        try { await api(`appointments/${button.dataset.cancelAppointment}/cancel`, { method: "POST" }); showToast("Appointment cancelled."); await loadAppointments(); }
+        catch (error) { showToast(error.message); button.disabled = false; }
+      });
+    });
+    $("#appointment-list").querySelectorAll("[data-reschedule]").forEach(form => {
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        try {
+          await api(`appointments/${form.dataset.reschedule}/reschedule`, { method: "POST", body: JSON.stringify({ date: toIsoDate(form.elements.date.value) }) });
+          showToast("Appointment rescheduled. Waiting for doctor confirmation.");
+          await loadAppointments();
+        } catch (error) { showToast(error.message); }
+      });
+    });
+    $("#appointment-list").querySelectorAll("[data-review]").forEach(form => {
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        try {
+          await api(`appointments/${form.dataset.review}/review`, { method: "POST", body: JSON.stringify({ rating: Number(form.elements.rating.value), comment: form.elements.comment.value }) });
+          showToast("Thanks for your review!");
+          await loadAppointments();
+        } catch (error) { showToast(error.message); }
+      });
+    });
+    $("#appointment-list").querySelectorAll("[data-pay-appointment]").forEach(button => {
+      button.addEventListener("click", () => payForAppointment(Number(button.dataset.payAppointment)));
+    });
   } catch (error) {
     showToast(error.message);
   }
+}
+async function payForAppointment(id) {
+  try {
+    const order = await api(`appointments/${id}/pay/order`, { method: "POST" });
+    if (!window.Razorpay) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://checkout.razorpay.com/v1/checkout.js";
+        script.onload = resolve;
+        script.onerror = () => reject(new Error("Could not load the payment window."));
+        document.head.append(script);
+      });
+    }
+    new window.Razorpay({
+      key: order.keyId, amount: order.amount, currency: order.currency, order_id: order.orderId,
+      name: "CareConnect", description: "Consultation fee",
+      handler: async response => {
+        try {
+          await api(`appointments/${id}/pay/verify`, { method: "POST", body: JSON.stringify(response) });
+          showToast("Payment received.");
+          await loadAppointments();
+        } catch (error) { showToast(error.message); }
+      }
+    }).open();
+  } catch (error) { showToast(error.message); }
 }
 function renderAppointmentSuggestions() {
   const suggestions = $("#appointment-suggestions");
@@ -499,6 +564,37 @@ function renderAppointmentSuggestions() {
     button.addEventListener("click", () => openProviderAppointment(button.dataset.appointmentRequest));
   });
 }
+const toLocalInput = iso => {
+  const date = new Date(iso), p = value => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+};
+function setupSlotPicker(enabled) {
+  const dateInput = $("#booking-form").elements.date;
+  $("#booking-slots").hidden = !enabled;
+  dateInput.readOnly = enabled;
+  dateInput.value = "";
+  $("#booking-slot-buttons").replaceChildren();
+  $("#booking-day").value = "";
+  $("#booking-day").min = new Date().toISOString().slice(0, 10);
+}
+async function loadSlots() {
+  const day = $("#booking-day").value, box = $("#booking-slot-buttons");
+  if (!state.selectedDoctor || !day) return;
+  box.textContent = "Loading…";
+  try {
+    const result = await api(`doctors/${state.selectedDoctor.id}/slots?date=${encodeURIComponent(day)}`);
+    box.innerHTML = result.slots.length
+      ? result.slots.map(slot => `<button type="button" class="button button-outline" data-slot="${escapeHtml(slot.start)}">${escapeHtml(new Date(slot.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</button>`).join("")
+      : '<p class="empty">No free slots on this day.</p>';
+  } catch (error) { box.textContent = error.message; }
+}
+$("#booking-day").addEventListener("change", loadSlots);
+$("#booking-slot-buttons").addEventListener("click", event => {
+  const button = event.target.closest("[data-slot]");
+  if (!button) return;
+  $("#booking-form").elements.date.value = toLocalInput(button.dataset.slot);
+  $("#booking-slot-buttons").querySelectorAll("button").forEach(item => item.classList.toggle("button-primary", item === button));
+});
 function openBooking(id) {
   if (!state.user) return openAuth("signin", "Please sign in before booking an appointment.");
   state.selectedDoctor = state.doctors.find(doctor => doctor.id === id);
@@ -508,6 +604,12 @@ function openBooking(id) {
   $("#booking-doctor").textContent = `${state.selectedDoctor.name} · ${state.selectedDoctor.specialty} · $${state.selectedDoctor.fee}`;
   $("#booking-request-note").hidden = true;
   $("#booking-submit").textContent = "Confirm appointment";
+  setupSlotPicker(true);
+  const doctorId = state.selectedDoctor.id;
+  api("doctors/ratings").then(ratings => {
+    const rating = ratings[doctorId];
+    if (rating && state.selectedDoctor?.id === doctorId) $("#booking-doctor").textContent += ` · ★ ${rating.average} (${rating.count})`;
+  }).catch(() => {});
   $("#booking-dialog").showModal();
 }
 function openProviderAppointment(providerId) {
@@ -521,6 +623,7 @@ function openProviderAppointment(providerId) {
   $("#booking-request-note").textContent = "This only saves your requested date and time in CareConnect. It does not contact or book the provider. Call or contact them directly to confirm availability.";
   $("#booking-request-note").hidden = false;
   $("#booking-submit").textContent = "Save requested time";
+  setupSlotPicker(false);
   $("#booking-dialog").showModal();
 }
 function openAuth(mode = "signin", message = "") {

@@ -105,6 +105,67 @@ function withinDoctorSchedule(doctor, isoDate) {
     minutes >= Number(match[2]) * 60 + Number(match[3]) && minutes < Number(match[4]) * 60 + Number(match[5]));
 }
 
+const isActive = appointment => !["Rejected", "Cancelled"].includes(appointment.status);
+const clinicDayKey = iso => new Intl.DateTimeFormat("en-CA", { timeZone: CLINIC_TIMEZONE }).format(new Date(iso));
+const parseId = value => { const id = Number(value); return Number.isSafeInteger(id) && id > 0 ? id : null; };
+const CHANGEABLE = ["Pending", "Accepted", "Request saved · unconfirmed"];
+const MIN_NOTICE_MS = 2 * 60 * 60 * 1000;
+
+async function checkBookable({ doctor, date, userId, ignoreAppointmentId = null }) {
+  if (!doctor) return null;
+  if (!withinDoctorSchedule(doctor, date)) return { status: 400, error: "This doctor is not available at that day or time. Please choose a time within their listed schedule." };
+  const slotTime = Date.parse(date);
+  const counts = appointment => appointment.id !== ignoreAppointmentId && isActive(appointment);
+  if ((await store.listAppointmentsForDoctor(doctor.id)).some(appointment => counts(appointment) && Date.parse(appointment.date) === slotTime)) {
+    return { status: 409, error: "That time slot is already booked. Please choose another time." };
+  }
+  if ((await store.listAppointmentsForUser(userId)).some(appointment => appointment.doctorId === doctor.id && counts(appointment) && clinicDayKey(appointment.date) === clinicDayKey(date))) {
+    return { status: 409, error: "You already have an appointment with this doctor on that day." };
+  }
+  return null;
+}
+
+const SLOT_MINUTES = 30;
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const pad2 = value => String(value).padStart(2, "0");
+function tzOffsetMs(utcMs) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: CLINIC_TIMEZONE, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(new Date(utcMs));
+  const get = type => Number(parts.find(part => part.type === type).value);
+  return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second")) - Math.floor(utcMs / 1000) * 1000;
+}
+function clinicLocalToUtcMs(dateStr, minutes) {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const guess = Date.UTC(year, month - 1, day) + minutes * 60000;
+  return guess - tzOffsetMs(guess);
+}
+
+const RZP_KEY_ID = process.env.RAZORPAY_KEY_ID || "";
+const RZP_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "";
+const PAYMENT_CURRENCY = process.env.PAYMENT_CURRENCY || "INR";
+const safeEqual = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
+
+function startReminderJob({ intervalMs = 5 * 60 * 1000 } = {}) {
+  const HOUR = 3600000;
+  const kinds = [{ key: "24h", min: HOUR, max: 24 * HOUR }, { key: "1h", min: 0, max: HOUR }];
+  async function tick() {
+    const now = Date.now();
+    for (const kind of kinds) {
+      const due = await store.listAppointmentsNeedingReminder(kind.key, new Date(now + kind.min).toISOString(), new Date(now + kind.max).toISOString());
+      for (const appointment of due) {
+        const user = await store.getUserById(appointment.userId);
+        if (!user?.email || mailer.mode === "disabled" || !(await store.markReminderSent(appointment.id, kind.key))) continue;
+        const doctor = appointment.doctorId ? await store.getDoctor(appointment.doctorId) : null;
+        const when = new Date(appointment.date).toLocaleString("en-IN", { timeZone: CLINIC_TIMEZONE, dateStyle: "full", timeStyle: "short" });
+        await mailer.send({ to: user.email, subject: "Appointment reminder", text: `Hello ${user.name},\n\nThis is a reminder of your appointment${doctor ? ` with ${doctor.name}` : ""} on ${when} (${CLINIC_TIMEZONE}).\n\nYou can cancel or reschedule from your CareConnect appointments page.` })
+          .catch(error => console.error("Reminder email failed:", error.message));
+      }
+    }
+  }
+  const timer = setInterval(() => tick().catch(error => console.error("Reminder job failed:", error.message)), intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 function isAdmin(user) {
   return user.role === "admin";
 }
@@ -246,6 +307,21 @@ function createApp(options = {}) {
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 4 } });
   app.disable("x-powered-by");
   applySecurityHeaders(app);
+  app.post("/api/webhooks/razorpay", express.raw({ type: "application/json", limit: "64kb" }), wrap(async (req, res) => {
+    await ready;
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!secret) return res.sendStatus(503);
+    if (!Buffer.isBuffer(req.body)) return res.sendStatus(400);
+    const expected = crypto.createHmac("sha256", secret).update(req.body).digest("hex");
+    if (!safeEqual(expected, req.get("x-razorpay-signature") || "")) return res.sendStatus(400);
+    let event;
+    try { event = JSON.parse(req.body.toString("utf8")); } catch { return res.sendStatus(400); }
+    if (event.event === "payment.captured") {
+      const payment = event.payload?.payment?.entity;
+      if (payment?.order_id && payment?.id) await store.markPaid(payment.order_id, String(payment.id));
+    }
+    res.sendStatus(200);
+  }));
   app.use(express.json({ limit: "32kb" }));
   app.use("/api", (req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
@@ -291,6 +367,30 @@ function createApp(options = {}) {
   app.get("/api/doctors", wrap(async (req, res) => {
     const departmentId = Number(req.query.departmentId);
     res.json(await store.listDoctors(departmentId || undefined));
+  }));
+  app.get("/api/doctors/ratings", wrap(async (req, res) => res.json(await store.doctorRatings())));
+  app.get("/api/doctors/:id/reviews", wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid doctor." });
+    res.json(await store.listReviewsForDoctor(id));
+  }));
+  app.get("/api/doctors/:id/slots", wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    const doctor = id ? await store.getDoctor(id) : null;
+    const dateStr = String(req.query.date || "");
+    const probe = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? new Date(`${dateStr}T00:00:00Z`) : null;
+    if (!doctor || !probe || Number.isNaN(probe.getTime()) || probe.toISOString().slice(0, 10) !== dateStr) return res.status(400).json({ error: "Choose a listed doctor and a valid date (YYYY-MM-DD)." });
+    const weekday = WEEKDAYS[probe.getUTCDay()];
+    const ranges = (doctor.schedule || []).map(schedule => SLOT_RE.exec(schedule)).filter(Boolean)
+      .filter(match => match[1].toLowerCase() === weekday)
+      .map(match => [Number(match[2]) * 60 + Number(match[3]), Number(match[4]) * 60 + Number(match[5])]);
+    const taken = new Set((await store.listAppointmentsForDoctor(doctor.id)).filter(isActive).map(appointment => Date.parse(appointment.date)));
+    const slots = [];
+    for (const [start, end] of ranges) for (let minute = start; minute + SLOT_MINUTES <= end; minute += SLOT_MINUTES) {
+      const ms = clinicLocalToUtcMs(dateStr, minute);
+      if (ms > Date.now() && !taken.has(ms)) slots.push({ start: new Date(ms).toISOString(), label: `${pad2(Math.floor(minute / 60))}:${pad2(minute % 60)}` });
+    }
+    res.json({ date: dateStr, timezone: CLINIC_TIMEZONE, slots });
   }));
   app.get("/api/products", wrap(async (req, res) => res.json(await store.listProducts())));
   app.get("/api/clinics", wrap(async (req, res) => {
@@ -552,7 +652,8 @@ function createApp(options = {}) {
   }));
 
   app.get("/api/appointments", requireUser, requirePatient, wrap(async (req, res) => {
-    res.json(await store.listAppointmentsForUser(req.user.id));
+    const [appointments, reviewed] = await Promise.all([store.listAppointmentsForUser(req.user.id), store.reviewedAppointmentIds(req.user.id)]);
+    res.json(appointments.map(appointment => ({ ...appointment, reviewed: reviewed.includes(appointment.id) })));
   }));
 
   app.post("/api/appointments", requireUser, requirePatient, requireVerifiedEmail, wrap(async (req, res) => {
@@ -573,31 +674,104 @@ function createApp(options = {}) {
     if ((!doctor && !externalProvider) || !validDate(date) || symptoms.length > 1500) {
       return res.status(400).json({ error: "Choose a listed doctor or nearby healthcare provider and a future appointment date." });
     }
-    if (doctor && !withinDoctorSchedule(doctor, date)) {
-      return res.status(400).json({ error: "This doctor is not available at that day or time. Please choose a time within their listed schedule." });
+    const problem = await checkBookable({ doctor, date, userId: req.user.id });
+    if (problem) return res.status(problem.status).json({ error: problem.error });
+    let appointment;
+    try {
+      appointment = await store.createAppointment({
+        userId: req.user.id,
+        doctorId: doctor ? doctor.id : null,
+        providerName, providerAddress, providerSource: "openstreetmap",
+        date, symptoms,
+        notes: String(body.notes || "").trim().slice(0, 1000),
+        status: doctor ? "Pending" : "Request saved · unconfirmed"
+      });
+    } catch (error) {
+      if (error.code === "23505" && error.constraint === "appointments_doctor_slot_uniq") return res.status(409).json({ error: "That time slot is already booked. Please choose another time." });
+      throw error;
     }
-    if (doctor) {
-      const slotTime = Date.parse(date);
-      const dayKey = iso => new Intl.DateTimeFormat("en-CA", { timeZone: CLINIC_TIMEZONE }).format(new Date(iso));
-      const active = appointment => appointment.status !== "Rejected";
-      const doctorAppointments = await store.listAppointmentsForDoctor(doctor.id);
-      if (doctorAppointments.some(appointment => active(appointment) && Date.parse(appointment.date) === slotTime)) {
-        return res.status(409).json({ error: "That time slot is already booked. Please choose another time." });
-      }
-      const mine = await store.listAppointmentsForUser(req.user.id);
-      if (mine.some(appointment => appointment.doctorId === doctor.id && active(appointment) && dayKey(appointment.date) === dayKey(date))) {
-        return res.status(409).json({ error: "You already have an appointment with this doctor on that day." });
-      }
-    }
-    const appointment = await store.createAppointment({
-      userId: req.user.id,
-      doctorId: doctor ? doctor.id : null,
-      providerName, providerAddress, providerSource: "openstreetmap",
-      date, symptoms,
-      notes: String(body.notes || "").trim().slice(0, 1000),
-      status: doctor ? "Pending" : "Request saved · unconfirmed"
-    });
     res.status(201).json(appointment);
+  }));
+
+  app.post("/api/appointments/:id/cancel", requireUser, requirePatient, wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    const appointment = id ? await store.getAppointmentForPatient(id, req.user.id) : null;
+    if (!appointment) return res.status(404).json({ error: "Appointment not found." });
+    if (!CHANGEABLE.includes(appointment.status)) return res.status(409).json({ error: "This appointment can no longer be cancelled." });
+    if (appointment.paymentStatus === "paid") return res.status(409).json({ error: "This appointment is paid. Please contact support to cancel and request a refund." });
+    if (Date.parse(appointment.date) - Date.now() < MIN_NOTICE_MS) return res.status(409).json({ error: "Appointments cannot be cancelled within 2 hours of the start time." });
+    const updated = await store.cancelAppointment(id, req.user.id, appointment.status);
+    if (!updated) return res.status(409).json({ error: "The appointment changed. Refresh and try again." });
+    res.json(updated);
+  }));
+  app.post("/api/appointments/:id/reschedule", requireUser, requirePatient, requireVerifiedEmail, wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    const date = String((req.body || {}).date || "");
+    const appointment = id ? await store.getAppointmentForPatient(id, req.user.id) : null;
+    if (!appointment) return res.status(404).json({ error: "Appointment not found." });
+    if (!CHANGEABLE.includes(appointment.status)) return res.status(409).json({ error: "This appointment can no longer be rescheduled." });
+    if (appointment.paymentStatus === "paid") return res.status(409).json({ error: "Paid appointments cannot be rescheduled. Please contact support." });
+    if (!validDate(date)) return res.status(400).json({ error: "Choose a future date and time." });
+    if (Date.parse(appointment.date) - Date.now() < MIN_NOTICE_MS) return res.status(409).json({ error: "Appointments cannot be rescheduled within 2 hours of the start time." });
+    if (appointment.doctorId) {
+      const doctor = await store.getDoctor(appointment.doctorId);
+      const problem = await checkBookable({ doctor, date, userId: req.user.id, ignoreAppointmentId: id });
+      if (problem) return res.status(problem.status).json({ error: problem.error });
+    }
+    const status = appointment.doctorId ? "Pending" : appointment.status;
+    let updated;
+    try { updated = await store.rescheduleAppointment(id, req.user.id, appointment.status, date, status); }
+    catch (error) {
+      if (error.code === "23505" && error.constraint === "appointments_doctor_slot_uniq") return res.status(409).json({ error: "That time slot is already booked. Please choose another time." });
+      throw error;
+    }
+    if (!updated) return res.status(409).json({ error: "The appointment changed. Refresh and try again." });
+    res.json(updated);
+  }));
+  app.post("/api/appointments/:id/review", requireUser, requirePatient, wrap(async (req, res) => {
+    const id = parseId(req.params.id);
+    const rating = Number((req.body || {}).rating);
+    const comment = String((req.body || {}).comment || "").trim();
+    const appointment = id ? await store.getAppointmentForPatient(id, req.user.id) : null;
+    if (!appointment || !appointment.doctorId) return res.status(404).json({ error: "Appointment not found." });
+    if (appointment.status !== "Completed") return res.status(409).json({ error: "You can review a doctor after the appointment is completed." });
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5 || comment.length > 1000) return res.status(400).json({ error: "Choose a rating from 1 to 5 and keep the comment under 1000 characters." });
+    const review = await store.createReview({ appointmentId: id, userId: req.user.id, doctorId: appointment.doctorId, rating, comment });
+    if (!review) return res.status(409).json({ error: "You have already reviewed this appointment." });
+    res.status(201).json({ id: review.id });
+  }));
+  app.post("/api/appointments/:id/pay/order", requireUser, requirePatient, requireVerifiedEmail, wrap(async (req, res) => {
+    if (!RZP_KEY_ID || !RZP_KEY_SECRET) return res.status(503).json({ error: "Online payments are not configured." });
+    const id = parseId(req.params.id);
+    const appointment = id ? await store.getAppointmentForPatient(id, req.user.id) : null;
+    if (!appointment || !appointment.doctorId) return res.status(404).json({ error: "Appointment not found." });
+    if (!["Pending", "Accepted"].includes(appointment.status)) return res.status(409).json({ error: "This appointment cannot be paid for." });
+    if (appointment.paymentStatus === "paid") return res.status(409).json({ error: "This appointment is already paid." });
+    const doctor = await store.getDoctor(appointment.doctorId);
+    if (!doctor || !Number.isFinite(Number(doctor.fee)) || Number(doctor.fee) <= 0) return res.status(409).json({ error: "The consultation fee is unavailable." });
+    const response = await fetch("https://api.razorpay.com/v1/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${RZP_KEY_ID}:${RZP_KEY_SECRET}`).toString("base64")}` },
+      body: JSON.stringify({ amount: Math.round(Number(doctor.fee) * 100), currency: PAYMENT_CURRENCY, receipt: `appt_${id}`, notes: { appointmentId: String(id) } }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok) return res.status(502).json({ error: "Could not start the payment. Please try again." });
+    const order = await response.json();
+    const saved = await store.setPaymentOrder(id, req.user.id, order.id);
+    if (!saved) return res.status(409).json({ error: "The appointment changed. Refresh and try again." });
+    res.json({ orderId: order.id, amount: order.amount, currency: order.currency, keyId: RZP_KEY_ID });
+  }));
+  app.post("/api/appointments/:id/pay/verify", requireUser, requirePatient, wrap(async (req, res) => {
+    if (!RZP_KEY_SECRET) return res.status(503).json({ error: "Online payments are not configured." });
+    const { razorpay_order_id: orderId, razorpay_payment_id: paymentId, razorpay_signature: signature } = req.body || {};
+    const id = parseId(req.params.id);
+    const appointment = id ? await store.getAppointmentForPatient(id, req.user.id) : null;
+    if (!appointment || !orderId || !paymentId || appointment.paymentOrderId !== orderId) return res.status(400).json({ error: "Payment does not match this appointment." });
+    const expected = crypto.createHmac("sha256", RZP_KEY_SECRET).update(`${orderId}|${paymentId}`).digest("hex");
+    if (!safeEqual(expected, signature || "")) return res.status(400).json({ error: "Payment signature could not be verified." });
+    const paid = await store.markPaid(orderId, String(paymentId));
+    if (!paid) return res.status(404).json({ error: "Payment order not found." });
+    res.json(paid);
   }));
 
   app.get("/api/doctor/me", requireUser, requireDoctor, (req, res) => {
@@ -1119,6 +1293,7 @@ function createApp(options = {}) {
 const app = createApp();
 if (require.main === module) {
   ready.then(() => {
+    if (process.env.REMINDERS !== "off" && process.env.NODE_ENV !== "test") startReminderJob();
     app.listen(port, () => console.log(`Healthcare Consultation running at http://localhost:${port} (database: ${store.driver}, email: ${mailer.mode})`));
     if (mailer.mode === "disabled") {
       console.warn("WARNING: email is not configured (set SMTP_URL or SMTP_HOST). Verification and password-reset emails cannot be sent, and email confirmation is not enforced.");

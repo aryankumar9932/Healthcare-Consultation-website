@@ -203,11 +203,34 @@ function createJsonStore(dbFile) {
       const appointment = {
         id: idFor(db.appointments), userId, doctorId: doctorId || null,
         ...(doctorId ? {} : { providerName, providerAddress, providerSource }),
-        date, notes, symptoms: symptoms || "", consultationNotes: "", status, createdAt: new Date().toISOString()
+        date, notes, symptoms: symptoms || "", consultationNotes: "", status, paymentStatus: "unpaid", createdAt: new Date().toISOString()
       };
       db.appointments.push(appointment);
       write(db);
       return appointment;
+    },
+    async getAppointmentForPatient(appointmentId, userId) {
+      return read().appointments.find(a => a.id === appointmentId && a.userId === userId) || null;
+    },
+    async cancelAppointment(appointmentId, userId, expectedStatus) {
+      const db = read();
+      const a = db.appointments.find(item => item.id === appointmentId && item.userId === userId);
+      if (!a || a.status !== expectedStatus) return null;
+      a.status = "Cancelled";
+      a.cancelledAt = new Date().toISOString();
+      write(db);
+      return a;
+    },
+    async rescheduleAppointment(appointmentId, userId, expectedStatus, date, newStatus) {
+      const db = read();
+      const a = db.appointments.find(item => item.id === appointmentId && item.userId === userId);
+      if (!a || a.status !== expectedStatus) return null;
+      a.date = date;
+      a.status = newStatus;
+      delete a.reminder24SentAt;
+      delete a.reminder1SentAt;
+      write(db);
+      return a;
     },
     async listAppointmentsForDoctor(doctorId) {
       const db = read();
@@ -235,6 +258,69 @@ function createJsonStore(dbFile) {
         patient: patient.id ? patient : null,
         doctor: db.doctors.find(item => item.id === appointment.doctorId) || null
       };
+    },
+    async listAppointmentsNeedingReminder(kind, fromIso, toIso) {
+      const flag = kind === "24h" ? "reminder24SentAt" : "reminder1SentAt";
+      return read().appointments.filter(a => a.status === "Accepted" && !a[flag] &&
+        Date.parse(a.date) > Date.parse(fromIso) && Date.parse(a.date) <= Date.parse(toIso));
+    },
+    async markReminderSent(appointmentId, kind) {
+      const flag = kind === "24h" ? "reminder24SentAt" : "reminder1SentAt";
+      const db = read();
+      const a = db.appointments.find(item => item.id === appointmentId);
+      if (!a || a[flag]) return false;
+      a[flag] = new Date().toISOString();
+      write(db);
+      return true;
+    },
+    async createReview({ appointmentId, userId, doctorId, rating, comment }) {
+      const db = read();
+      db.reviews ||= [];
+      if (db.reviews.some(review => review.appointmentId === appointmentId)) return null;
+      const review = { id: idFor(db.reviews), appointmentId, userId, doctorId, rating, comment, createdAt: new Date().toISOString() };
+      db.reviews.push(review);
+      write(db);
+      return review;
+    },
+    async reviewedAppointmentIds(userId) {
+      return (read().reviews || []).filter(review => review.userId === userId).map(review => review.appointmentId);
+    },
+    async listReviewsForDoctor(doctorId) {
+      const db = read();
+      return (db.reviews || []).filter(review => review.doctorId === doctorId)
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .slice(0, 100)
+        .map(review => ({ id: review.id, rating: review.rating, comment: review.comment, createdAt: review.createdAt,
+          authorName: String(db.users.find(user => user.id === review.userId)?.name || "Patient").split(" ")[0] }));
+    },
+    async doctorRatings() {
+      const out = {};
+      for (const review of read().reviews || []) {
+        const aggregate = out[review.doctorId] ||= { sum: 0, count: 0 };
+        aggregate.sum += review.rating;
+        aggregate.count += 1;
+      }
+      return Object.fromEntries(Object.entries(out).map(([id, aggregate]) => [id, {
+        average: Math.round(aggregate.sum / aggregate.count * 10) / 10, count: aggregate.count
+      }]));
+    },
+    async setPaymentOrder(appointmentId, userId, orderId) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.id === appointmentId && item.userId === userId);
+      if (!appointment || appointment.paymentStatus === "paid") return null;
+      appointment.paymentOrderId = orderId;
+      appointment.paymentStatus ||= "unpaid";
+      write(db);
+      return appointment;
+    },
+    async markPaid(orderId, paymentId) {
+      const db = read();
+      const appointment = db.appointments.find(item => item.paymentOrderId === orderId);
+      if (!appointment) return null;
+      appointment.paymentStatus = "paid";
+      appointment.paymentId = paymentId;
+      write(db);
+      return appointment;
     },
     async updateAppointmentStatus(appointmentId, doctorId, expectedStatus, status) {
       const db = read();

@@ -36,7 +36,8 @@ const mapAppointment = r => r && ({
   ...(r.doctor_id ? {} : { providerName: r.provider_name, providerAddress: r.provider_address, providerSource: r.provider_source }),
   date: iso(r.scheduled_for), notes: r.notes, symptoms: r.symptoms || "",
   consultationNotes: r.consultation_notes || "", completedAt: iso(r.completed_at),
-  status: r.status, createdAt: iso(r.created_at)
+  status: r.status, createdAt: iso(r.created_at), cancelledAt: iso(r.cancelled_at),
+  paymentStatus: r.payment_status, paymentOrderId: r.payment_order_id
 });
 
 function createPgStore(connectionString, options = {}) {
@@ -223,6 +224,57 @@ function createPgStore(connectionString, options = {}) {
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
         [userId, doctorId || null, doctorId ? null : providerName, doctorId ? null : providerAddress, doctorId ? null : providerSource, new Date(date), notes, symptoms || "", status]);
       return mapAppointment(rows[0]);
+    },
+    async getAppointmentForPatient(appointmentId, userId) {
+      const { rows } = await q("SELECT * FROM appointments WHERE id=$1 AND user_id=$2", [appointmentId, userId]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async cancelAppointment(appointmentId, userId, expectedStatus) {
+      const { rows } = await q(`UPDATE appointments SET status='Cancelled', cancelled_at=now()
+        WHERE id=$1 AND user_id=$2 AND status=$3 RETURNING *`, [appointmentId, userId, expectedStatus]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async rescheduleAppointment(appointmentId, userId, expectedStatus, date, newStatus) {
+      const { rows } = await q(`UPDATE appointments SET scheduled_for=$4, status=$5,
+        reminder_24h_sent_at=NULL, reminder_1h_sent_at=NULL
+        WHERE id=$1 AND user_id=$2 AND status=$3 RETURNING *`, [appointmentId, userId, expectedStatus, date, newStatus]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async listAppointmentsNeedingReminder(kind, fromIso, toIso) {
+      const col = kind === "24h" ? "reminder_24h_sent_at" : "reminder_1h_sent_at";
+      const { rows } = await q(`SELECT * FROM appointments WHERE status='Accepted' AND ${col} IS NULL
+        AND scheduled_for > $1 AND scheduled_for <= $2`, [fromIso, toIso]);
+      return rows.map(mapAppointment);
+    },
+    async markReminderSent(appointmentId, kind) {
+      const col = kind === "24h" ? "reminder_24h_sent_at" : "reminder_1h_sent_at";
+      const { rowCount } = await q(`UPDATE appointments SET ${col}=now() WHERE id=$1 AND ${col} IS NULL`, [appointmentId]);
+      return rowCount === 1;
+    },
+    async createReview({ appointmentId, userId, doctorId, rating, comment }) {
+      const { rows } = await q(`INSERT INTO reviews (appointment_id, user_id, doctor_id, rating, comment)
+        VALUES ($1,$2,$3,$4,$5) ON CONFLICT (appointment_id) DO NOTHING RETURNING *`, [appointmentId, userId, doctorId, rating, comment]);
+      return rows[0] || null;
+    },
+    async reviewedAppointmentIds(userId) {
+      return (await q("SELECT appointment_id FROM reviews WHERE user_id=$1", [userId])).rows.map(row => row.appointment_id);
+    },
+    async listReviewsForDoctor(doctorId) {
+      const { rows } = await q(`SELECT r.id, r.rating, r.comment, r.created_at, split_part(u.name, ' ', 1) AS author_name
+        FROM reviews r JOIN users u ON u.id=r.user_id WHERE r.doctor_id=$1 ORDER BY r.created_at DESC LIMIT 100`, [doctorId]);
+      return rows.map(row => ({ id: row.id, rating: row.rating, comment: row.comment, createdAt: iso(row.created_at), authorName: row.author_name }));
+    },
+    async doctorRatings() {
+      const { rows } = await q("SELECT doctor_id, ROUND(AVG(rating)::numeric, 1) AS average, COUNT(*)::int AS count FROM reviews GROUP BY doctor_id");
+      return Object.fromEntries(rows.map(row => [row.doctor_id, { average: Number(row.average), count: row.count }]));
+    },
+    async setPaymentOrder(appointmentId, userId, orderId) {
+      const { rows } = await q("UPDATE appointments SET payment_order_id=$3 WHERE id=$1 AND user_id=$2 AND payment_status<>'paid' RETURNING *", [appointmentId, userId, orderId]);
+      return mapAppointment(rows[0]) || null;
+    },
+    async markPaid(orderId, paymentId) {
+      const { rows } = await q("UPDATE appointments SET payment_status='paid', payment_id=$2 WHERE payment_order_id=$1 RETURNING *", [orderId, paymentId]);
+      return mapAppointment(rows[0]) || null;
     },
     async listAppointmentsForDoctor(doctorId) {
       const { rows } = await q(`SELECT a.*, u.id AS p_id, u.name AS p_name, u.email AS p_email, u.phone AS p_phone,

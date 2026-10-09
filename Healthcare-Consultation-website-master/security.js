@@ -40,10 +40,11 @@ function applySecurityHeaders(app) {
       useDefaults: false,
       directives: {
         "default-src": ["'self'"],
-        "script-src": ["'self'", "https://unpkg.com"],
+        "script-src": ["'self'", "https://unpkg.com", "https://checkout.razorpay.com"],
         "style-src": ["'self'", "https://unpkg.com"],
         "img-src": ["'self'", "data:", "blob:", "https://unpkg.com", "https://*.tile.openstreetmap.org"],
-        "connect-src": ["'self'"],
+        "connect-src": ["'self'", "https://api.razorpay.com", "https://lumberjack.razorpay.com"],
+        "frame-src": ["https://api.razorpay.com", "https://checkout.razorpay.com"],
         "font-src": ["'self'", "data:"],
         "object-src": ["'none'"],
         "base-uri": ["'self'"],
