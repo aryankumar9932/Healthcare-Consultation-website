@@ -1,8 +1,6 @@
 # Healthcare Consultation Platform
 
-This project runs as a full-stack Node.js and Express website. The original PHP pages remain in the repository, while the runnable application is served from `server.js` and `public/`. Accounts, appointments, orders, and the existing catalogue are stored in `data/db.json`.
-
-The legacy `SQL/online_rest.sql` file contains table definitions only. Its original demo records were removed before public publishing because they included personal details and weak password hashes.
+This project runs as a full-stack Node.js and Express website, served from `server.js` and `public/`. Accounts, appointments, orders, and the existing catalogue are stored in `data/db.json`.
 
 ## Run the website
 
@@ -107,8 +105,6 @@ See [REVIEW_AND_ROADMAP.md](./REVIEW_AND_ROADMAP.md) for limitations and recomme
 ## Production configuration
 
 Set `NODE_ENV=production` and provide a long, random `SESSION_SECRET` before launch. The session cookie is HTTP-only, SameSite=Lax, and marked Secure in production. Set `DATABASE_URL` in production: PostgreSQL stores the data and the sessions (see "Database (PostgreSQL)" below). Without it the app falls back to an in-memory session store and the JSON file, which are for local development and small demonstrations only. Serve the site over HTTPS and back up the database.
-
-The legacy PHP payment endpoints require `SSLCOMMERZ_STORE_ID` and `SSLCOMMERZ_STORE_PASSWORD` in the PHP process environment. No payment credentials are included in the repository.
 
 Run the available unit tests with `npm test`.
 

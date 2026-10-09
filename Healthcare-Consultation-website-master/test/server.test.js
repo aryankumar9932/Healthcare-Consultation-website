@@ -4,6 +4,16 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+function nextValidSlot(daysAhead = 1, hourIST = 11) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + daysAhead);
+  while (![1, 3].includes(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), hourIST - 5, 30)).getUTCDay())) {
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+  date.setUTCHours(hourIST - 5, 30, 0, 0);
+  return date.toISOString();
+}
+
 const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "careconnect-test-"));
 process.env.DB_FILE = path.join(dataDirectory, "db.json");
 process.env.SESSION_SECRET = "test-only-session-secret-that-is-long-enough";
@@ -278,7 +288,7 @@ test("searches nearby OpenStreetMap healthcare listings for signed-in users", as
 });
 
 test("books appointments in the authenticated session and reports missing Gemini configuration", async () => {
-  const appointmentDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+  const appointmentDate = nextValidSlot(2, 11);
   const booking = await fetch(`${baseUrl}/api/appointments`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Cookie: sessionCookie },
@@ -454,7 +464,7 @@ test("supports assigned doctor workflows, encrypted patient reports, prescriptio
     : [patientRegistration.headers.get("set-cookie") || ""];
   const patientCookie = patientCookies.map(value => value.split(";")[0]).join("; ");
 
-  const appointmentDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const appointmentDate = nextValidSlot(9, 12);
   const booking = await fetch(`${baseUrl}/api/appointments`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Cookie: patientCookie },

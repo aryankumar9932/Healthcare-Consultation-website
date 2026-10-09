@@ -57,7 +57,7 @@ function applySecurityHeaders(app) {
     hsts: isProd() ? { maxAge: 15552000, includeSubDomains: true } : false
   }));
   app.use((req, res, next) => {
-    res.setHeader("Permissions-Policy", "camera=(), microphone=(), payment=(), geolocation=(self)");
+    res.setHeader("Permissions-Policy", "camera=(self), microphone=(self), payment=(), geolocation=(self)");
     next();
   });
 }

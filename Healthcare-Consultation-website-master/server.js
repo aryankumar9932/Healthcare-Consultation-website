@@ -86,6 +86,25 @@ function validDate(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value)) && Date.parse(value) > Date.now();
 }
 
+const CLINIC_TIMEZONE = process.env.CLINIC_TIMEZONE || "Asia/Kolkata";
+const SLOT_RE = /^\s*([A-Za-z]+)\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\s*$/;
+
+function clinicLocalParts(isoDate) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: CLINIC_TIMEZONE, weekday: "long", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+  }).formatToParts(new Date(isoDate));
+  const get = type => parts.find(part => part.type === type).value;
+  return { weekday: get("weekday").toLowerCase(), minutes: Number(get("hour")) * 60 + Number(get("minute")) };
+}
+
+function withinDoctorSchedule(doctor, isoDate) {
+  const slots = (Array.isArray(doctor.schedule) ? doctor.schedule : []).map(slot => SLOT_RE.exec(slot)).filter(Boolean);
+  if (!slots.length) return true;
+  const { weekday, minutes } = clinicLocalParts(isoDate);
+  return slots.some(match => match[1].toLowerCase() === weekday &&
+    minutes >= Number(match[2]) * 60 + Number(match[3]) && minutes < Number(match[4]) * 60 + Number(match[5]));
+}
+
 function isAdmin(user) {
   return user.role === "admin";
 }
@@ -553,6 +572,22 @@ function createApp(options = {}) {
       providerAddress.length <= 300;
     if ((!doctor && !externalProvider) || !validDate(date) || symptoms.length > 1500) {
       return res.status(400).json({ error: "Choose a listed doctor or nearby healthcare provider and a future appointment date." });
+    }
+    if (doctor && !withinDoctorSchedule(doctor, date)) {
+      return res.status(400).json({ error: "This doctor is not available at that day or time. Please choose a time within their listed schedule." });
+    }
+    if (doctor) {
+      const slotTime = Date.parse(date);
+      const dayKey = iso => new Intl.DateTimeFormat("en-CA", { timeZone: CLINIC_TIMEZONE }).format(new Date(iso));
+      const active = appointment => appointment.status !== "Rejected";
+      const doctorAppointments = await store.listAppointmentsForDoctor(doctor.id);
+      if (doctorAppointments.some(appointment => active(appointment) && Date.parse(appointment.date) === slotTime)) {
+        return res.status(409).json({ error: "That time slot is already booked. Please choose another time." });
+      }
+      const mine = await store.listAppointmentsForUser(req.user.id);
+      if (mine.some(appointment => appointment.doctorId === doctor.id && active(appointment) && dayKey(appointment.date) === dayKey(date))) {
+        return res.status(409).json({ error: "You already have an appointment with this doctor on that day." });
+      }
     }
     const appointment = await store.createAppointment({
       userId: req.user.id,
