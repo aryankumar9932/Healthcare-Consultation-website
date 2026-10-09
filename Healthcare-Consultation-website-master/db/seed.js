@@ -28,7 +28,8 @@ const seed = {
   prescriptions: [],
   medicalReports: [],
   authTokens: [],
-  reviews: []
+  reviews: [],
+  notifications: []
 };
 
 module.exports = { seed };

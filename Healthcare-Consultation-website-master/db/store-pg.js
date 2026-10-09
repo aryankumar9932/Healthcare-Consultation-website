@@ -276,6 +276,24 @@ function createPgStore(connectionString, options = {}) {
       const { rows } = await q("UPDATE appointments SET payment_status='paid', payment_id=$2 WHERE payment_order_id=$1 RETURNING *", [orderId, paymentId]);
       return mapAppointment(rows[0]) || null;
     },
+    async createNotification({ userId, type, message, link }) {
+      const { rows } = await q(`INSERT INTO notifications (user_id, type, message, link) VALUES ($1,$2,$3,$4) RETURNING *`,
+        [userId, type, message, link || "/appointments"]);
+      return rows[0];
+    },
+    async listNotifications(userId, limit = 30) {
+      const { rows } = await q("SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2", [userId, limit]);
+      const { rows: [{ count }] } = await q("SELECT COUNT(*)::int AS count FROM notifications WHERE user_id=$1 AND read_at IS NULL", [userId]);
+      return {
+        unread: count,
+        items: rows.map(row => ({ id: row.id, type: row.type, message: row.message, link: row.link, readAt: iso(row.read_at), createdAt: iso(row.created_at) }))
+      };
+    },
+    async markNotificationsRead(userId, id = null) {
+      const { rowCount } = await q(`UPDATE notifications SET read_at=now()
+        WHERE user_id=$1 AND read_at IS NULL AND ($2::int IS NULL OR id=$2)`, [userId, id]);
+      return rowCount;
+    },
     async listAppointmentsForDoctor(doctorId) {
       const { rows } = await q(`SELECT a.*, u.id AS p_id, u.name AS p_name, u.email AS p_email, u.phone AS p_phone,
           u.date_of_birth AS p_date_of_birth, d.department_id AS d_department_id, d.name AS d_name, d.specialty AS d_specialty,

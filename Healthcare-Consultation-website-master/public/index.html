@@ -15,7 +15,7 @@
     <nav>
       <a href="/dashboard">Dashboard</a><a href="/doctors">Doctors</a><a href="/hospitals">Hospitals</a><a href="/nearby">Nearby care</a><a href="/ai-tools">AI tools</a><a class="button button-primary nav-ml-link" href="/ml-service">ML service</a><a href="/pharmacy">Pharmacy</a><a href="/appointments">My appointments</a><a id="doctor-nav" href="/doctor" hidden>Doctor dashboard</a>
     </nav>
-    <div class="header-actions"><span id="user-label"></span><button id="password-button" class="button button-outline" type="button" hidden>Password</button><button id="auth-button" class="button button-outline">Sign in</button><button id="cart-button" class="cart">Cart <b id="cart-count">0</b></button></div>
+    <div class="header-actions"><span id="user-label"></span><button id="password-button" class="button button-outline" type="button" hidden>Password</button><button id="bell-button" class="button button-outline" type="button" hidden aria-label="Notifications">🔔 <b id="bell-count" hidden>0</b></button><button id="auth-button" class="button button-outline">Sign in</button><button id="cart-button" class="cart">Cart <b id="cart-count">0</b></button></div>
   </header>
   <div id="verify-banner" class="verify-banner" role="status" hidden>
     <span id="verify-banner-text"></span>
@@ -166,6 +166,7 @@
   <div id="toast" class="toast"></div>
   <dialog id="auth-dialog" aria-label="Sign in or create an account"><button class="dialog-close" data-close>×</button><div id="auth-content"></div></dialog>
   <dialog id="booking-dialog"><button class="dialog-close" data-close>×</button><h2 id="booking-title">Book an appointment</h2><p id="booking-doctor"></p><p id="booking-request-note" class="booking-request-note" hidden></p><form id="booking-form"><label>Date and time<input name="date" type="datetime-local" required></label><div id="booking-slots" hidden><label>Pick a day<input id="booking-day" type="date"></label><div id="booking-slot-buttons" class="slot-buttons" aria-live="polite"></div></div><label>Symptoms or reason for visit <span>(optional; shared with your assigned doctor)</span><textarea name="symptoms" rows="3" maxlength="1500"></textarea></label><label>Anything else we should know? <span>(optional)</span><textarea name="notes" rows="3" maxlength="1000"></textarea></label><button id="booking-submit" class="button button-primary" type="submit">Confirm appointment</button></form></dialog>
+  <dialog id="notification-dialog"><button class="dialog-close" data-close>×</button><h2>Notifications</h2><div id="notification-list"></div><button id="notifications-mark-read" class="button button-outline" type="button">Mark all as read</button></dialog>
   <dialog id="cart-dialog"><button class="dialog-close" data-close>×</button><h2>Your cart</h2><div id="cart-content"></div></dialog>
   <dialog id="location-consent-dialog" class="location-consent-dialog" aria-labelledby="location-consent-title">
     <h2 id="location-consent-title">Find doctors and medical stores near you?</h2>

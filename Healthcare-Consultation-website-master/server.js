@@ -169,6 +169,12 @@ function startReminderJob({ intervalMs = 5 * 60 * 1000 } = {}) {
   return () => { clearInterval(timer); clearTimeout(first); };
 }
 
+async function notify(userId, type, message, link = "/appointments") {
+  if (!userId) return;
+  try { await store.createNotification({ userId, type, message: String(message).slice(0, 300), link }); }
+  catch (error) { console.error("Notification failed:", error.message); }
+}
+
 function isAdmin(user) {
   return user.role === "admin";
 }
@@ -365,6 +371,15 @@ function createApp(options = {}) {
     const userId = Number(req.session && req.session.userId);
     const user = Number.isSafeInteger(userId) ? await store.getUserById(userId) : null;
     res.json({ user: user ? sessionUser(user) : null });
+  }));
+  app.get("/api/notifications", requireUser, wrap(async (req, res) => {
+    res.json(await store.listNotifications(req.user.id));
+  }));
+  app.post("/api/notifications/read", requireUser, wrap(async (req, res) => {
+    const raw = (req.body || {}).id;
+    const id = raw === undefined || raw === null ? null : parseId(raw);
+    if (raw !== undefined && raw !== null && !id) return res.status(400).json({ error: "Invalid notification." });
+    res.json({ marked: await store.markNotificationsRead(req.user.id, id) });
   }));
   app.get("/api/departments", wrap(async (req, res) => res.json(await store.listDepartments())));
   app.get("/api/doctors", wrap(async (req, res) => {
@@ -693,6 +708,8 @@ function createApp(options = {}) {
       if (error.code === "23505" && error.constraint === "appointments_doctor_slot_uniq") return res.status(409).json({ error: "That time slot is already booked. Please choose another time." });
       throw error;
     }
+    if (doctor) await notify(await store.getDoctorAccountId(doctor.id), "appointment_new",
+      `New appointment request from ${req.user.name} on ${new Date(date).toLocaleString("en-IN", { timeZone: CLINIC_TIMEZONE })}.`, "/doctor");
     res.status(201).json(appointment);
   }));
 
@@ -705,6 +722,8 @@ function createApp(options = {}) {
     if (Date.parse(appointment.date) - Date.now() < MIN_NOTICE_MS) return res.status(409).json({ error: "Appointments cannot be cancelled within 2 hours of the start time." });
     const updated = await store.cancelAppointment(id, req.user.id, appointment.status);
     if (!updated) return res.status(409).json({ error: "The appointment changed. Refresh and try again." });
+    if (appointment.doctorId) await notify(await store.getDoctorAccountId(appointment.doctorId), "appointment_cancelled",
+      `${req.user.name} cancelled the appointment on ${new Date(appointment.date).toLocaleString("en-IN", { timeZone: CLINIC_TIMEZONE })}.`, "/doctor");
     res.json(updated);
   }));
   app.post("/api/appointments/:id/reschedule", requireUser, requirePatient, requireVerifiedEmail, wrap(async (req, res) => {
@@ -729,6 +748,8 @@ function createApp(options = {}) {
       throw error;
     }
     if (!updated) return res.status(409).json({ error: "The appointment changed. Refresh and try again." });
+    if (appointment.doctorId) await notify(await store.getDoctorAccountId(appointment.doctorId), "appointment_rescheduled",
+      `${req.user.name} requested a new time: ${new Date(date).toLocaleString("en-IN", { timeZone: CLINIC_TIMEZONE })}. Please confirm.`, "/doctor");
     res.json(updated);
   }));
   app.post("/api/appointments/:id/review", requireUser, requirePatient, wrap(async (req, res) => {
@@ -741,6 +762,7 @@ function createApp(options = {}) {
     if (!Number.isInteger(rating) || rating < 1 || rating > 5 || comment.length > 1000) return res.status(400).json({ error: "Choose a rating from 1 to 5 and keep the comment under 1000 characters." });
     const review = await store.createReview({ appointmentId: id, userId: req.user.id, doctorId: appointment.doctorId, rating, comment });
     if (!review) return res.status(409).json({ error: "You have already reviewed this appointment." });
+    await notify(await store.getDoctorAccountId(appointment.doctorId), "review", `You received a new ${rating}-star review.`, "/doctor");
     res.status(201).json({ id: review.id });
   }));
   app.post("/api/appointments/:id/pay/order", requireUser, requirePatient, requireVerifiedEmail, wrap(async (req, res) => {
@@ -774,6 +796,8 @@ function createApp(options = {}) {
     if (!safeEqual(expected, signature || "")) return res.status(400).json({ error: "Payment signature could not be verified." });
     const paid = await store.markPaid(orderId, String(paymentId));
     if (!paid) return res.status(404).json({ error: "Payment order not found." });
+    await notify(req.user.id, "payment", "Payment received for your appointment. Thank you!");
+    await notify(await store.getDoctorAccountId(appointment.doctorId), "payment", `${req.user.name} paid the consultation fee.`, "/doctor");
     res.json(paid);
   }));
 
@@ -815,6 +839,8 @@ function createApp(options = {}) {
     if (!allowed) return res.status(409).json({ error: "That appointment status transition is not allowed." });
     const updated = await store.updateAppointmentStatus(appointmentId, req.doctor.id, appointment.status, status);
     if (!updated) return res.status(409).json({ error: "The appointment changed before the status could be saved. Refresh and try again." });
+    await notify(appointment.userId, "appointment_status",
+      `Your appointment on ${new Date(appointment.date).toLocaleString("en-IN", { timeZone: CLINIC_TIMEZONE })} was ${status.toLowerCase()} by ${req.doctor.name}.`);
     res.json(updated);
   }));
   app.put("/api/doctor/appointments/:id/consultation", requireUser, requireDoctor, wrap(async (req, res) => {

@@ -273,7 +273,38 @@ function renderHeader() {
   $("#doctor-nav").hidden = state.user?.role !== "doctor";
   $("#admin-clinics").hidden = !state.user?.isAdmin;
   $("#admin-bootstrap-section").hidden = !state.user?.canBootstrapAdmin;
+  refreshNotifications();
 }
+async function refreshNotifications() {
+  $("#bell-button").hidden = !state.user;
+  if (!state.user) return;
+  try {
+    const { unread } = await api("notifications");
+    $("#bell-count").textContent = unread > 99 ? "99+" : unread;
+    $("#bell-count").hidden = unread === 0;
+  } catch { /* the bell is not critical */ }
+}
+async function openNotifications() {
+  try {
+    const { items } = await api("notifications");
+    $("#notification-list").innerHTML = items.length ? items.map(notification => {
+      const link = typeof notification.link === "string" && notification.link.startsWith("/") && !notification.link.startsWith("//")
+        ? notification.link : "/appointments";
+      return `<a class="appointment-card notification-item ${notification.readAt ? "" : "notification-unread"}" href="${escapeHtml(link)}">
+        <div><p>${escapeHtml(notification.message)}</p><span class="doctor-meta">${escapeHtml(new Date(notification.createdAt).toLocaleString())}</span></div></a>`;
+    }).join("") : '<p class="empty">No notifications yet.</p>';
+    if (!$("#notification-dialog").open) $("#notification-dialog").showModal();
+  } catch (error) { showToast(error.message); }
+}
+$("#bell-button").addEventListener("click", openNotifications);
+$("#notifications-mark-read").addEventListener("click", async () => {
+  try {
+    await api("notifications/read", { method: "POST", body: JSON.stringify({}) });
+    await refreshNotifications();
+    await openNotifications();
+  } catch (error) { showToast(error.message); }
+});
+setInterval(() => { if (!document.hidden) refreshNotifications(); }, 60 * 1000);
 function renderDepartments() {
   $("#department-grid").innerHTML = state.departments.map((department, index) => `
     <article class="department-card"><div class="department-icon">${["♥", "✦", "◌", "＋", "✚", "◆"][index % 6]}</div>

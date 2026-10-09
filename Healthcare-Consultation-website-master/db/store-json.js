@@ -322,6 +322,34 @@ function createJsonStore(dbFile) {
       write(db);
       return appointment;
     },
+    async createNotification({ userId, type, message, link }) {
+      const db = read();
+      db.notifications ||= [];
+      const notification = { id: idFor(db.notifications), userId, type, message, link: link || "/appointments", readAt: null, createdAt: new Date().toISOString() };
+      db.notifications.push(notification);
+      if (db.notifications.length > 5000) db.notifications = db.notifications.slice(-5000);
+      write(db);
+      return notification;
+    },
+    async listNotifications(userId, limit = 30) {
+      const mine = (read().notifications || []).filter(notification => notification.userId === userId);
+      return {
+        unread: mine.filter(notification => !notification.readAt).length,
+        items: mine.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, limit)
+      };
+    },
+    async markNotificationsRead(userId, id = null) {
+      const db = read();
+      let changed = 0;
+      for (const notification of db.notifications || []) {
+        if (notification.userId === userId && !notification.readAt && (id === null || notification.id === id)) {
+          notification.readAt = new Date().toISOString();
+          changed++;
+        }
+      }
+      if (changed) write(db);
+      return changed;
+    },
     async updateAppointmentStatus(appointmentId, doctorId, expectedStatus, status) {
       const db = read();
       const appointment = db.appointments.find(item => item.id === appointmentId && item.doctorId === doctorId);
