@@ -973,12 +973,33 @@ function locationErrorMessage(error) {
   if (error.code === 3) return "Location lookup timed out. Try again when your device has a clearer GPS signal.";
   return "Your browser could not access location. Open this site on localhost or over HTTPS, then try again.";
 }
+function renderMapFallback(mapElement, location) {
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  const latitudeDelta = 0.02;
+  const longitudeDelta = 0.02 / Math.max(Math.cos(latitude * Math.PI / 180), 0.2);
+  const bounds = [
+    Math.max(-180, longitude - longitudeDelta),
+    Math.max(-90, latitude - latitudeDelta),
+    Math.min(180, longitude + longitudeDelta),
+    Math.min(90, latitude + latitudeDelta)
+  ].join(",");
+  const embed = new URL("https://www.openstreetmap.org/export/embed.html");
+  embed.searchParams.set("bbox", bounds);
+  embed.searchParams.set("layer", "mapnik");
+  embed.searchParams.set("marker", `${latitude},${longitude}`);
+  const listing = new URL("https://www.openstreetmap.org/");
+  listing.searchParams.set("mlat", latitude);
+  listing.searchParams.set("mlon", longitude);
+  listing.hash = `map=14/${latitude}/${longitude}`;
+  mapElement.innerHTML = `<iframe class="map-fallback-frame" title="OpenStreetMap centered on your location" loading="lazy" referrerpolicy="no-referrer" src="${escapeHtml(embed.href)}"></iframe><a class="map-fallback-link" href="${escapeHtml(listing.href)}" target="_blank" rel="noopener noreferrer">Open this location in OpenStreetMap</a>`;
+}
 function createMap(mapId = "clinic-map", providers = state.nearbyClinics) {
   const mapElement = $(`#${mapId}`);
   if (!state.location || !mapElement) return;
   mapElement.hidden = false;
   if (!window.L) {
-    mapElement.innerHTML = `<p class="empty">The interactive OpenStreetMap could not load. <a href="https://www.openstreetmap.org/?mlat=${encodeURIComponent(state.location.latitude)}&mlon=${encodeURIComponent(state.location.longitude)}#map=14/${encodeURIComponent(state.location.latitude)}/${encodeURIComponent(state.location.longitude)}" target="_blank" rel="noopener noreferrer">Open this location in OpenStreetMap</a>.</p>`;
+    renderMapFallback(mapElement, state.location);
     return;
   }
   if (state.map && state.map.getContainer() !== mapElement) {
