@@ -21,7 +21,7 @@ const savedLocation = (() => {
 const state = {
   departments: [], doctors: [], products: [], clinics: [], osmProviders: [], nearbyClinics: [],
   cart: savedCart, user: null, selectedDoctor: null, selectedAppointmentProvider: null, location: savedLocation, locationLabel: sessionStorage.getItem("careconnect-location-label") || "", map: null,
-  markers: null, locationRequestId: 0, osmSearchError: ""
+  markers: null, locationRequestId: 0, osmSearchError: "", nearbySource: ""
 };
 const chatHistory = [];
 const $ = selector => document.querySelector(selector);
@@ -91,6 +91,7 @@ const api = async (endpoint, options = {}, retried = false) => {
     headers["X-CSRF-Token"] = csrfToken;
   }
   const response = await fetch(`/api/${endpoint}`, { ...options, headers, credentials: "same-origin" });
+  if (endpoint === "nearby") state.nearbySource = response.headers.get("X-Nearby-Source") || "";
   if (response.status === 403 && unsafe && !retried) {
     const failure = await response.clone().json().catch(() => ({}));
     if (failure.code === "CSRF") {
@@ -384,7 +385,7 @@ function findMedicalStores() {
   button.disabled = true;
   button.textContent = "Searching nearby stores...";
   $("#pharmacy-nearby-results").innerHTML = '<p class="empty">Refreshing nearby medical store listings…</p>';
-  loadOpenStreetMapProviders(state.location).then(providers => {
+  loadOpenStreetMapProviders(state.location, Number($("#pharmacy-radius").value)).then(providers => {
     state.osmProviders = providers;
     state.osmSearchError = "";
     renderPharmacyStores();
@@ -418,7 +419,8 @@ function renderPharmacyStores() {
     state.location,
     radius
   );
-  results.innerHTML = pharmacies.length ? `<p class="nearby-count">${pharmacies.length} nearby medical store${pharmacies.length === 1 ? "" : "s"} found within ${radius} km</p>
+  const staleNotice = state.nearbySource === "stale" ? '<p class="empty">OpenStreetMap is temporarily unavailable. Showing a recent cached result.</p>' : "";
+  results.innerHTML = pharmacies.length ? `${staleNotice}<p class="nearby-count">${pharmacies.length} nearby medical store${pharmacies.length === 1 ? "" : "s"} found within ${radius} km</p>
     <div class="pharmacy-nearby-list">${pharmacies.map(pharmacy => {
       const directions = new URL("https://www.openstreetmap.org/directions");
       directions.searchParams.set("engine", "fossgis_osrm_car");
@@ -431,7 +433,7 @@ function renderPharmacyStores() {
         <div class="pharmacy-nearby-links">${pharmacy.mapURI ? `<a href="${escapeHtml(pharmacy.mapURI)}" target="_blank" rel="noopener noreferrer">View store listing</a>` : ""}
           <a href="${escapeHtml(directions.href)}" target="_blank" rel="noopener noreferrer">Get directions</a></div></div></article>`;
     }).join("")}</div>`
-    : `<p class="empty">No OpenStreetMap-listed medical stores were found within ${radius} km. Try a wider search radius or refresh your location.</p>${externalSearch}`;
+    : `${staleNotice}<p class="empty">No OpenStreetMap-listed medical stores were found within ${radius} km. Try a wider search radius or refresh your location.</p>${externalSearch}`;
 }
 function renderProducts() {
   $("#product-grid").innerHTML = state.products.map(product => `
@@ -951,10 +953,10 @@ async function refreshClinicDirectory() {
 async function loadPublicClinics() {
   state.clinics = await api("clinics");
 }
-function loadOpenStreetMapProviders(origin) {
+function loadOpenStreetMapProviders(origin, radiusKm = 50) {
   return api("nearby", {
     method: "POST",
-    body: JSON.stringify({ latitude: origin.latitude, longitude: origin.longitude })
+    body: JSON.stringify({ latitude: origin.latitude, longitude: origin.longitude, radiusKm })
   });
 }
 function googleMapsSearchUrl(query, location) {
@@ -1070,13 +1072,13 @@ function renderNearbyClinics() {
   specialtySelect.disabled = category === "pharmacy";
   if (!matchingCategory.length) {
     directory.innerHTML = category === "pharmacy"
-      ? `<p class="empty">No OpenStreetMap-listed medical stores were found. Try another type or share a different location.</p>${googleMapsFallback("pharmacies medical stores", "pharmacies and medical stores")}`
-      : `<p class="empty">No OpenStreetMap-listed healthcare providers were found. Try another type or share a different location.</p>${googleMapsFallback("hospitals doctors clinics dentists", "hospitals and doctors")}`;
+      ? `${state.nearbySource === "stale" ? '<p class="empty">Showing a recent cached OpenStreetMap result.</p>' : ""}<p class="empty">No OpenStreetMap-listed medical stores were found. Try another type or share a different location.</p>${googleMapsFallback("pharmacies medical stores", "pharmacies and medical stores")}`
+      : `${state.nearbySource === "stale" ? '<p class="empty">Showing a recent cached OpenStreetMap result.</p>' : ""}<p class="empty">No OpenStreetMap-listed healthcare providers were found. Try another type or share a different location.</p>${googleMapsFallback("hospitals doctors clinics dentists", "hospitals and doctors")}`;
     createMap("clinic-map", []);
     return;
   }
   const resultLabel = category === "pharmacy" ? "medical store" : category === "healthcare" ? "healthcare provider" : "provider";
-  directory.innerHTML = `${state.nearbyClinics.length ? `<p class="nearby-count">${state.nearbyClinics.length} nearby ${resultLabel}${state.nearbyClinics.length === 1 ? "" : "s"} found</p>
+  directory.innerHTML = `${state.nearbySource === "stale" ? '<p class="empty">OpenStreetMap is temporarily unavailable. Showing a recent cached result.</p>' : ""}${state.nearbyClinics.length ? `<p class="nearby-count">${state.nearbyClinics.length} nearby ${resultLabel}${state.nearbyClinics.length === 1 ? "" : "s"} found</p>
     <div class="nearby-list">${state.nearbyClinics.map(clinic => `<article class="nearby-card ${clinic.category === "pharmacy" ? "pharmacy-result" : ""}">
       <div><span class="doctor-meta">${escapeHtml(clinic.doctor.specialty)} · ${clinic.distanceKm.toFixed(1)} km away${clinic.category === "pharmacy" ? " · Medical store" : ""}</span>
       <h3>${escapeHtml(clinic.doctor.name)}</h3>${clinic.name && clinic.name !== clinic.doctor.name ? `<strong>${escapeHtml(clinic.name)}</strong>` : ""}<p>${escapeHtml(clinic.address)}</p>

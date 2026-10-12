@@ -1,3 +1,5 @@
+// Avoid hanging outbound requests on networks with broken IPv6 routes.
+require("node:dns").setDefaultResultOrder("ipv4first");
 const express = require("express");
 const session = require("express-session");
 const multer = require("multer");
@@ -9,6 +11,7 @@ const PDFDocument = require("pdfkit");
 const { analyzeDocument, chatWithHealthAssistant, predictNoShow, readPrescription, recommendSpecialty } = require("./ml");
 const { normalizeOpenStreetMapElement } = require("./public/geo");
 const mlService = require("./ml-client");
+const { createNearbyFinder } = require("./overpass");
 const { createStore } = require("./db");
 const { applySecurityHeaders, csrfToken, csrfProtection, defaultLimits, limiter } = require("./security");
 const { createMailer, templates } = require("./mailer");
@@ -293,7 +296,7 @@ async function sendPasswordResetEmail(user) {
 const validPassword = value => typeof value === "string" && value.length >= 8 && value.length <= 128;
 
 let lastGeocodeAt = 0;
-async function searchOpenStreetMapAddress(address) {
+async function searchNominatim(address) {
   const delay = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
   if (delay) await new Promise(resolve => setTimeout(resolve, delay));
   lastGeocodeAt = Date.now();
@@ -336,6 +339,47 @@ async function searchOpenStreetMapAddress(address) {
   };
 }
 
+async function searchPhoton(address) {
+  const unavailable = () => Object.assign(new Error("OpenStreetMap address search is unavailable. Try again later."), { status: 503, expose: true });
+  const url = new URL("https://photon.komoot.io/api/");
+  url.searchParams.set("q", address);
+  url.searchParams.set("limit", "1");
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { "User-Agent": `CareConnect/1.0 (${process.env.OSM_CONTACT_EMAIL || "local healthcare directory"})` },
+      signal: AbortSignal.timeout(10000)
+    });
+  } catch { throw unavailable(); }
+  if (!response.ok) throw unavailable();
+  const feature = ((await response.json().catch(() => ({}))).features || [])[0];
+  const [longitude, latitude] = (feature?.geometry?.coordinates || []).map(Number);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    throw Object.assign(new Error("That place could not be found. Try a town, city, or full address."), { status: 400, expose: true });
+  }
+  const properties = feature.properties || {};
+  const label = [properties.name, properties.street, properties.city || properties.county,
+    properties.state, properties.country].filter(Boolean).join(", ");
+  return { latitude, longitude, label: (label || address).slice(0, 300) };
+}
+
+async function searchOpenStreetMapAddress(address) {
+  try {
+    return await searchNominatim(address);
+  } catch (error) {
+    if (error.status !== 503) throw error;
+    try { return await searchPhoton(address); }
+    catch (fallbackError) { throw fallbackError.status === 400 ? fallbackError : error; }
+  }
+}
+
+const configuredOverpassUrls = String(process.env.OVERPASS_URLS || process.env.OVERPASS_ENDPOINTS || "")
+  .split(",").map(value => value.trim()).filter(value => /^https?:\/\//i.test(value));
+const nearbyFinder = createNearbyFinder({
+  ...(configuredOverpassUrls.length ? { endpoints: configuredOverpassUrls } : {}),
+  userAgent: `CareConnect/1.0 (${process.env.OSM_CONTACT_EMAIL || "nearby healthcare directory"})`
+});
+
 async function geocodeClinicAddress(address, excludeId) {
   const existing = await store.findClinicByAddress(address, excludeId);
   if (existing) return { latitude: existing.latitude, longitude: existing.longitude };
@@ -345,61 +389,6 @@ async function geocodeClinicAddress(address, excludeId) {
 
 function publicClinic(clinic) {
   return { ...clinic, doctor: publicUser(clinic.doctor) };
-}
-
-function overpassEndpoints() {
-  const configured = String(process.env.OVERPASS_ENDPOINTS || "").split(",").map(value => value.trim()).filter(Boolean);
-  const candidates = configured.length ? configured : [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter"
-  ];
-  return [...new Set(candidates.filter(value => {
-    try {
-      const url = new URL(value);
-      return url.protocol === "https:" && url.pathname.endsWith("/api/interpreter") && !url.username && !url.password;
-    } catch {
-      return false;
-    }
-  }))];
-}
-
-async function searchOpenStreetMapNearby(query) {
-  const endpoints = overpassEndpoints();
-  if (!endpoints.length) throw new Error("No valid Overpass API endpoints are configured.");
-  let lastError;
-  for (const endpoint of endpoints) {
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          "User-Agent": "CareConnect/1.0 (nearby healthcare directory)"
-        },
-        body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(20000)
-      });
-      if (response.status === 429 || response.status === 406) {
-        const error = new Error("Nearby search is temporarily rate-limited. Please wait 30 seconds before trying again.");
-        error.rateLimited = true;
-        throw error;
-      }
-      if (!response.ok) {
-        lastError = new Error(`Overpass endpoint returned HTTP ${response.status}.`);
-        if (response.status < 500 && response.status !== 408) break;
-        continue;
-      }
-      const result = await response.json();
-      if (!Array.isArray(result.elements)) {
-        lastError = new Error("Overpass returned an invalid nearby search response.");
-        continue;
-      }
-      return result.elements;
-    } catch (error) {
-      if (error.rateLimited) throw error;
-      lastError = error;
-    }
-  }
-  throw lastError || new Error("No Overpass endpoint is available.");
 }
 
 function validDateOfBirth(value) {
@@ -523,25 +512,20 @@ function createApp(options = {}) {
     res.json(await searchOpenStreetMapAddress(query));
   }));
   app.post("/api/nearby", requireUser, async (req, res, next) => {
-    const latitude = Number((req.body || {}).latitude);
-    const longitude = Number((req.body || {}).longitude);
+    const body = req.body || {};
+    const latitude = Number(body.latitude);
+    const longitude = Number(body.longitude);
     if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
         !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
       return res.status(400).json({ error: "A valid latitude and longitude are required." });
     }
-    const radius = 50000;
-    const query = `[out:json][timeout:20];(nwr["amenity"="pharmacy"](around:${radius},${latitude},${longitude});nwr["healthcare"="pharmacy"](around:${radius},${latitude},${longitude});nwr["shop"="chemist"](around:${radius},${latitude},${longitude});)->.pharmacies;(nwr["amenity"~"^(doctors|clinic|hospital|dentist)$"](around:${radius},${latitude},${longitude});nwr["healthcare"~"^(doctor|clinic|hospital|dentist|medical_centre)$"](around:${radius},${latitude},${longitude});)->.healthcare;.pharmacies out center tags 100;.healthcare out center tags 80;`;
+    const requested = body.radiusKm == null ? NaN : Number(body.radiusKm);
+    const radiusKm = Number.isFinite(requested) ? Math.min(50, Math.max(1, Math.round(requested))) : 50;
     try {
-      const elements = await searchOpenStreetMapNearby(query);
+      const { elements, source } = await nearbyFinder.find(latitude, longitude, radiusKm);
+      res.set("X-Nearby-Source", source);
       res.json(elements.map(normalizeOpenStreetMapElement).filter(Boolean));
-    } catch (cause) {
-      const error = new Error(cause.rateLimited
-        ? cause.message
-        : cause.name === "AbortError" || cause.name === "TimeoutError"
-          ? "Nearby search timed out on available OpenStreetMap services. Please try again shortly."
-          : "Nearby search is temporarily unavailable on OpenStreetMap services. Please try again shortly.");
-      error.status = cause.rateLimited ? 429 : 503;
-      error.expose = true;
+    } catch (error) {
       next(error);
     }
   });
