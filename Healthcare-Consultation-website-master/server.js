@@ -347,6 +347,61 @@ function publicClinic(clinic) {
   return { ...clinic, doctor: publicUser(clinic.doctor) };
 }
 
+function overpassEndpoints() {
+  const configured = String(process.env.OVERPASS_ENDPOINTS || "").split(",").map(value => value.trim()).filter(Boolean);
+  const candidates = configured.length ? configured : [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter"
+  ];
+  return [...new Set(candidates.filter(value => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && url.pathname.endsWith("/api/interpreter") && !url.username && !url.password;
+    } catch {
+      return false;
+    }
+  }))];
+}
+
+async function searchOpenStreetMapNearby(query) {
+  const endpoints = overpassEndpoints();
+  if (!endpoints.length) throw new Error("No valid Overpass API endpoints are configured.");
+  let lastError;
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "User-Agent": "CareConnect/1.0 (nearby healthcare directory)"
+        },
+        body: new URLSearchParams({ data: query }),
+        signal: AbortSignal.timeout(20000)
+      });
+      if (response.status === 429 || response.status === 406) {
+        const error = new Error("Nearby search is temporarily rate-limited. Please wait 30 seconds before trying again.");
+        error.rateLimited = true;
+        throw error;
+      }
+      if (!response.ok) {
+        lastError = new Error(`Overpass endpoint returned HTTP ${response.status}.`);
+        if (response.status < 500 && response.status !== 408) break;
+        continue;
+      }
+      const result = await response.json();
+      if (!Array.isArray(result.elements)) {
+        lastError = new Error("Overpass returned an invalid nearby search response.");
+        continue;
+      }
+      return result.elements;
+    } catch (error) {
+      if (error.rateLimited) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("No Overpass endpoint is available.");
+}
+
 function validDateOfBirth(value) {
   if (!value) return true;
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -477,31 +532,15 @@ function createApp(options = {}) {
     const radius = 50000;
     const query = `[out:json][timeout:20];(nwr["amenity"="pharmacy"](around:${radius},${latitude},${longitude});nwr["healthcare"="pharmacy"](around:${radius},${latitude},${longitude});nwr["shop"="chemist"](around:${radius},${latitude},${longitude});)->.pharmacies;(nwr["amenity"~"^(doctors|clinic|hospital|dentist)$"](around:${radius},${latitude},${longitude});nwr["healthcare"~"^(doctor|clinic|hospital|dentist|medical_centre)$"](around:${radius},${latitude},${longitude});)->.healthcare;.pharmacies out center tags 100;.healthcare out center tags 80;`;
     try {
-      const response = await fetch("https://overpass-api.de/api/interpreter", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          "User-Agent": "CareConnect/1.0 (nearby healthcare directory)"
-        },
-        body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(25000)
-      });
-
-      if (!response.ok) {
-        const error = new Error(`OpenStreetMap nearby search returned HTTP ${response.status}. Please try again later.`);
-        error.status = 503;
-        error.expose = true;
-        throw error;
-      }
-      const result = await response.json();
-      if (!Array.isArray(result.elements)) throw new Error("OpenStreetMap returned an invalid nearby search response.");
-      res.json(result.elements.map(normalizeOpenStreetMapElement).filter(Boolean));
+      const elements = await searchOpenStreetMapNearby(query);
+      res.json(elements.map(normalizeOpenStreetMapElement).filter(Boolean));
     } catch (cause) {
-      if (cause.expose) return next(cause);
-      const error = new Error(cause.name === "AbortError" || cause.name === "TimeoutError"
-        ? "OpenStreetMap nearby search timed out. Wait a moment and try again."
-        : "OpenStreetMap nearby search is unavailable. Please try again later.");
-      error.status = 503;
+      const error = new Error(cause.rateLimited
+        ? cause.message
+        : cause.name === "AbortError" || cause.name === "TimeoutError"
+          ? "Nearby search timed out on available OpenStreetMap services. Please try again shortly."
+          : "Nearby search is temporarily unavailable on OpenStreetMap services. Please try again shortly.");
+      error.status = cause.rateLimited ? 429 : 503;
       error.expose = true;
       next(error);
     }
