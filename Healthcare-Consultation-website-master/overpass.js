@@ -1,9 +1,9 @@
 "use strict";
 
 const DEFAULT_ENDPOINTS = Object.freeze([
+  "https://lz4.overpass-api.de/api/interpreter",
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
-  "https://lz4.overpass-api.de/api/interpreter"
+  "https://overpass.private.coffee/api/interpreter"
 ]);
 
 function buildQuery(latitude, longitude, radiusMeters) {
