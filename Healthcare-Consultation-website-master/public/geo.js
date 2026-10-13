@@ -79,7 +79,77 @@
     };
   }
 
-  const tools = { distanceKm, findNearby, filterByCategory, isHospital, isDoctor, normalizeOpenStreetMapElement };
+  // ---- OpenStreetMap lookups that also work from the visitor's browser (used when the server cannot reach OSM) ----
+  const OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter"
+  ];
+
+  function buildOverpassQuery(latitude, longitude, radiusMeters) {
+    if (![latitude, longitude, radiusMeters].every(Number.isFinite) || latitude < -90 || latitude > 90 ||
+        longitude < -180 || longitude > 180 || radiusMeters <= 0) throw new TypeError("Invalid search area.");
+    const around = `(around:${Math.round(radiusMeters)},${latitude},${longitude})`;
+    return `[out:json][timeout:25];
+(nwr["amenity"="pharmacy"]${around};nwr["healthcare"="pharmacy"]${around};nwr["shop"="chemist"]${around};)->.pharmacies;
+(nwr["amenity"~"^(doctors|clinic|hospital|dentist)$"]${around};nwr["healthcare"~"^(doctor|clinic|hospital|dentist|medical_centre)$"]${around};)->.healthcare;
+.pharmacies out center tags 100;
+.healthcare out center tags 80;`;
+  }
+
+  // Runs the nearby search straight from the caller's network, trying each mirror in turn.
+  async function searchOverpass(origin, { radiusKm = 50, mirrors = OVERPASS_MIRRORS, timeoutMs = 15000, fetchImpl = root.fetch.bind(root) } = {}) {
+    const query = buildOverpassQuery(origin.latitude, origin.longitude, radiusKm * 1000);
+    for (const url of mirrors) {
+      try {
+        // No custom headers: a plain form POST avoids a CORS preflight request.
+        const response = await fetchImpl(url, { method: "POST", body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(timeoutMs) });
+        if (!response.ok) continue;
+        const data = JSON.parse(await response.text());
+        const failed = data.elements && data.elements.length === 0 && /timed out|out of memory|rate_limited|too busy/i.test(String(data.remark || ""));
+        if (!Array.isArray(data.elements) || failed) continue;
+        return data.elements.map(normalizeOpenStreetMapElement).filter(Boolean);
+      } catch { /* try the next mirror */ }
+    }
+    throw new Error("OpenStreetMap could not be reached from your browser either. Check your internet connection and try again.");
+  }
+
+  // Place-name search: Nominatim first, then Photon. Returns null when neither can answer.
+  async function geocodePlace(query, { fetchImpl = root.fetch.bind(root), timeoutMs = 10000 } = {}) {
+    const attempts = [
+      async () => {
+        const url = new URL("https://nominatim.openstreetmap.org/search");
+        url.searchParams.set("q", query); url.searchParams.set("format", "jsonv2"); url.searchParams.set("limit", "1");
+        const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const hit = (await response.json())[0];
+        return hit && { latitude: Number(hit.lat), longitude: Number(hit.lon), label: String(hit.display_name || query).slice(0, 300) };
+      },
+      async () => {
+        const url = new URL("https://photon.komoot.io/api/");
+        url.searchParams.set("q", query); url.searchParams.set("limit", "1");
+        const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const feature = ((await response.json()).features || [])[0];
+        if (!feature) return null;
+        const [longitude, latitude] = (feature.geometry?.coordinates || []).map(Number);
+        const p = feature.properties || {};
+        const label = [p.name, p.street, p.city || p.county, p.state, p.country].filter(Boolean).join(", ");
+        return { latitude, longitude, label: (label || query).slice(0, 300) };
+      }
+    ];
+    for (const attempt of attempts) {
+      try {
+        const result = await attempt();
+        if (result && Number.isFinite(result.latitude) && Number.isFinite(result.longitude)) return result;
+      } catch { /* try the next geocoder */ }
+    }
+    return null;
+  }
+
+  const tools = { distanceKm, findNearby, filterByCategory, isHospital, isDoctor, normalizeOpenStreetMapElement,
+    buildOverpassQuery, searchOverpass, geocodePlace };
   if (typeof module !== "undefined" && module.exports) module.exports = tools;
   root.CareConnectGeo = tools;
 })(globalThis);

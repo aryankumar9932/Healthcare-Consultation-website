@@ -6,17 +6,20 @@ const DEFAULT_ENDPOINTS = Object.freeze([
   "https://overpass.private.coffee/api/interpreter"
 ]);
 
-function buildQuery(latitude, longitude, radiusMeters) {
-  if (![latitude, longitude, radiusMeters].every(Number.isFinite) ||
-      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 || radiusMeters <= 0) {
-    throw new TypeError("Invalid search area.");
-  }
-  const around = `(around:${Math.round(radiusMeters)},${latitude},${longitude})`;
-  return `[out:json][timeout:25];
-(nwr["amenity"="pharmacy"]${around};nwr["healthcare"="pharmacy"]${around};nwr["shop"="chemist"]${around};)->.pharmacies;
-(nwr["amenity"~"^(doctors|clinic|hospital|dentist)$"]${around};nwr["healthcare"~"^(doctor|clinic|hospital|dentist|medical_centre)$"]${around};)->.healthcare;
-.pharmacies out center tags 100;
-.healthcare out center tags 80;`;
+const { buildOverpassQuery: buildQuery } = require("./public/geo"); // one query definition shared with the browser
+
+// Node wraps the real reason inside error.cause (and AggregateError for dual-stack connects).
+function networkCode(error) {
+  const inner = error?.cause;
+  return inner?.code || inner?.errors?.find(item => item?.code)?.code || error?.code || inner?.name || error?.message || "UNKNOWN";
+}
+function explainNetworkCode(code) {
+  if (["ENOTFOUND", "EAI_AGAIN", "EAI_FAIL"].includes(code)) return "DNS lookup failed (blocked or broken DNS; try DNS_SERVERS=1.1.1.1,8.8.8.8)";
+  if (code === "ECONNREFUSED") return "connection refused (firewall, or a proxy is required; try HTTPS_PROXY)";
+  if (["ECONNRESET", "EPIPE"].includes(code)) return "connection reset (a network filter or ISP is dropping the connection; try a proxy/VPN or the browser fallback)";
+  if (["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "EHOSTUNREACH", "ENETUNREACH"].includes(code)) return "no route to the server (offline, blocked, or an IPv6-only problem)";
+  if (/CERT|SIGNATURE|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/i.test(code)) return "TLS certificate not trusted (antivirus/proxy HTTPS scanning? start Node with NODE_OPTIONS=--use-system-ca)";
+  return `network error ${code}`;
 }
 
 const hostOf = value => {
@@ -38,9 +41,9 @@ async function queryEndpoint(url, query, timeoutMs, userAgent) {
     });
   } catch (cause) {
     const timedOut = cause.name === "TimeoutError" || cause.name === "AbortError";
-    throw Object.assign(new Error(timedOut ? "timed out" : `unreachable (${cause.cause?.code || cause.message})`), {
-      kind: timedOut ? "timeout" : "network"
-    });
+    if (timedOut) throw Object.assign(new Error("timed out"), { kind: "timeout" });
+    const code = networkCode(cause);
+    throw Object.assign(new Error(`unreachable (${code})`), { kind: "network", code, reason: explainNetworkCode(code) });
   }
   if (response.status === 429 || response.status === 406 || response.status >= 500) {
     throw Object.assign(new Error(`busy (HTTP ${response.status})`), { kind: "busy" });
@@ -98,14 +101,15 @@ function createNearbyFinder({
         return { elements, endpoint: hostOf(url) };
       } catch (error) {
         unhealthyUntil.set(url, now() + cooldownMs);
-        failures.push({ host: hostOf(url), kind: error.kind || "network", message: error.message });
+        failures.push({ host: hostOf(url), kind: error.kind || "network", message: error.message, reason: error.reason || error.message });
         if (error.kind === "http") break;
       }
     }
     const onlyNetworkFailures = failures.length && failures.every(failure => failure.kind === "network");
     const error = new Error(onlyNetworkFailures
-      ? "Could not reach OpenStreetMap from the server. Check the server's internet connection or firewall."
+      ? `Could not reach OpenStreetMap from the server (${failures[0].reason.split(/[;(:]/)[0].trim()}).` // short reason for visitors; full hints go to the log
       : "OpenStreetMap's servers are busy right now. Please try again in a minute.");
+    error.publicCode = onlyNetworkFailures ? "OSM_UNREACHABLE" : "OSM_BUSY";
     error.status = 503;
     error.expose = true;
     error.failures = failures;
@@ -127,7 +131,7 @@ function createNearbyFinder({
         return { elements, source: "live", endpoint };
       } catch (error) {
         if (error.failures) log("[nearby] all Overpass mirrors failed:", error.failures.map(failure =>
-          `${failure.host}: ${failure.message}`).join(" | "));
+          `${failure.host}: ${failure.reason}`).join(" | "));
         if (cached && now() - cached.at < staleTtlMs) return { elements: cached.elements, source: "stale" };
         throw error;
       } finally {
@@ -141,4 +145,4 @@ function createNearbyFinder({
   return { find, _cache: cache };
 }
 
-module.exports = { createNearbyFinder, buildQuery, DEFAULT_ENDPOINTS };
+module.exports = { createNearbyFinder, buildQuery, DEFAULT_ENDPOINTS, networkCode, explainNetworkCode };

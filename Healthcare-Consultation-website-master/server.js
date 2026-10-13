@@ -1,5 +1,4 @@
-// Avoid hanging outbound requests on networks with broken IPv6 routes.
-require("node:dns").setDefaultResultOrder("ipv4first");
+require("./net-setup").setupNetwork(); // IPv4-first DNS + optional HTTPS_PROXY / DNS_SERVERS for restricted networks
 const express = require("express");
 const session = require("express-session");
 const multer = require("multer");
@@ -1462,7 +1461,7 @@ function createApp(options = {}) {
     const message = error.expose || status < 500
       ? error.message
       : "The request could not be completed. Please try again.";
-    res.status(status).json({ error: message });
+    res.status(status).json(error.publicCode ? { error: message, code: error.publicCode } : { error: message });
   });
   return app;
 }

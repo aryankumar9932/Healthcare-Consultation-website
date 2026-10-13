@@ -102,7 +102,7 @@ const api = async (endpoint, options = {}, retried = false) => {
   if (unsafe && ["login", "register", "logout"].includes(endpoint)) csrfToken = null; // session was replaced
   if (response.status === 204) return null;
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Something went wrong.");
+  if (!response.ok) throw Object.assign(new Error(data.error || "Something went wrong."), { status: response.status, code: data.code });
   return data;
 };
   const metricCard = (label, value) => `<article class="health-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
@@ -954,11 +954,24 @@ async function refreshClinicDirectory() {
 async function loadPublicClinics() {
   state.clinics = await api("clinics");
 }
-function loadOpenStreetMapProviders(origin, radiusKm = 50) {
-  return api("nearby", {
-    method: "POST",
-    body: JSON.stringify({ latitude: origin.latitude, longitude: origin.longitude, radiusKm })
-  });
+async function loadOpenStreetMapProviders(origin, radiusKm = 50) {
+  try {
+    return await api("nearby", {
+      method: "POST",
+      body: JSON.stringify({ latitude: origin.latitude, longitude: origin.longitude, radiusKm })
+    });
+  } catch (serverError) {
+    // The server could not reach OpenStreetMap (blocked network, proxy, DNS...). Your own browser often can,
+    // so try the same search from here before giving up. This sends the search location straight to OpenStreetMap.
+    if (!["OSM_UNREACHABLE", "OSM_BUSY"].includes(serverError.code)) throw serverError;
+    try {
+      const providers = await CareConnectGeo.searchOverpass(origin, { radiusKm });
+      state.nearbySource = "browser";
+      return providers;
+    } catch {
+      throw serverError;
+    }
+  }
 }
 function googleMapsSearchUrl(query, location) {
   const search = new URL("https://www.google.com/maps/search/");
@@ -1664,7 +1677,14 @@ $("#location-search-form").addEventListener("submit", async event => {
   const query = String(new FormData(form).get("query") || "").trim();
   setLoading(form, true, "Searching place...");
   try {
-    const result = await api("location/geocode", { method: "POST", body: JSON.stringify({ query }) });
+    let result;
+    try {
+      result = await api("location/geocode", { method: "POST", body: JSON.stringify({ query }) });
+    } catch (serverError) {
+      if (serverError.status !== 503) throw serverError;
+      result = await CareConnectGeo.geocodePlace(query); // the server cannot reach OpenStreetMap: try from this browser
+      if (!result) throw serverError;
+    }
     await searchNearbyAt({ latitude: result.latitude, longitude: result.longitude }, result.label);
   } catch (error) {
     showToast(error.message);

@@ -43,7 +43,10 @@ function applySecurityHeaders(app) {
         "script-src": ["'self'", "https://unpkg.com", "https://checkout.razorpay.com"],
         "style-src": ["'self'", "https://unpkg.com"],
         "img-src": ["'self'", "data:", "blob:", "https://unpkg.com", "https://*.tile.openstreetmap.org"],
-        "connect-src": ["'self'", "https://api.razorpay.com", "https://lumberjack.razorpay.com"],
+        "connect-src": ["'self'", "https://api.razorpay.com", "https://lumberjack.razorpay.com",
+          // Browser fallback when the server cannot reach OpenStreetMap itself
+          "https://overpass-api.de", "https://lz4.overpass-api.de", "https://overpass.private.coffee", "https://overpass.kumi.systems",
+          "https://nominatim.openstreetmap.org", "https://photon.komoot.io"],
         "frame-src": ["https://api.razorpay.com", "https://checkout.razorpay.com"],
         "font-src": ["'self'", "data:"],
         "object-src": ["'none'"],
