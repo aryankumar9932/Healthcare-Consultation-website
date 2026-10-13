@@ -99,6 +99,12 @@ const api = async (endpoint, options = {}, retried = false) => {
       return api(endpoint, options, true);
     }
   }
+  if (unsafe && ["login", "register", "logout"].includes(endpoint)) csrfToken = null; // session was replaced
+  if (response.status === 204) return null;
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Something went wrong.");
+  return data;
+};
   const metricCard = (label, value) => `<article class="health-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
   async function loadPatientWorkspace() {
     const [analytics, reports, prescriptions] = await Promise.all([
@@ -233,12 +239,7 @@ const api = async (endpoint, options = {}, retried = false) => {
       $("#doctor-appointments").innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
     }
   }
-  if (unsafe && ["login", "register", "logout"].includes(endpoint)) csrfToken = null; // session was replaced
-  if (response.status === 204) return null;
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Something went wrong.");
-  return data;
-};
+
 const showToast = message => {
   const toast = $("#toast");
   toast.textContent = message;
